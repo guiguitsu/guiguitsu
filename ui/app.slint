@@ -1,0 +1,16 @@
+import { VerticalBox } from "std-widgets.slint";
+
+export component App inherits Window {
+    title: "Hello World";
+    preferred-width: 400px;
+    preferred-height: 300px;
+
+    VerticalBox {
+        alignment: center;
+        Text {
+            text: "Hello, Slint!";
+            font-size: 24px;
+            horizontal-alignment: center;
+        }
+    }
+}
