@@ -1,0 +1,44 @@
+import { StackCommit } from "../types.slint";
+
+export component CommitCard inherits Rectangle {
+    in property <StackCommit> commit;
+
+    height: 90px;
+    background: #2b3a4a;
+    border-radius: 6px;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 4px;
+
+        Text {
+            text: root.commit.description;
+            color: #e0e8f0;
+            font-size: 13px;
+            overflow: elide;
+        }
+
+        Text {
+            text: root.commit.change-id;
+            color: #b388ff;
+            font-size: 11px;
+            font-family: "monospace";
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+
+            Text {
+                text: root.commit.author;
+                color: #8899aa;
+                font-size: 11px;
+            }
+
+            Text {
+                text: root.commit.timestamp;
+                color: #667788;
+                font-size: 11px;
+            }
+        }
+    }
+}

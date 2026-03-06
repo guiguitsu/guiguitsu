@@ -1,0 +1,12 @@
+export struct StackCommit {
+    change-id: string,
+    commit-id: string,
+    description: string,
+    author: string,
+    timestamp: string,
+}
+
+export struct Stack {
+    name: string,
+    commits: [StackCommit],
+}

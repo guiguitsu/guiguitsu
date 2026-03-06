@@ -1,0 +1,196 @@
+import { LogEntry, GraphCellData } from "../types.slint";
+
+component GraphCellView inherits Rectangle {
+    in property <int> cell-type;
+    in property <bool> line-above;
+    in property <bool> line-below;
+    in property <bool> merge-from-left;
+    in property <bool> merge-from-right;
+    width: 20px;
+    height: 28px;
+    background: transparent;
+
+    // Node (cell-type 1): line above (top edge to center)
+    if cell-type == 1 && root.line-above: Rectangle {
+        width: 2px;
+        height: parent.height / 2;
+        x: (parent.width - self.width) / 2;
+        y: 0;
+        background: #5599dd;
+    }
+
+    // Node (cell-type 1): line below (center to bottom)
+    if cell-type == 1 && root.line-below: Rectangle {
+        width: 2px;
+        height: parent.height / 2;
+        x: (parent.width - self.width) / 2;
+        y: parent.height / 2;
+        background: #5599dd;
+    }
+
+    // Node (cell-type 1): merge stub from left
+    if cell-type == 1 && root.merge-from-left: Rectangle {
+        width: parent.width / 2;
+        height: 2px;
+        x: 0;
+        y: (parent.height - self.height) / 2;
+        background: #5599dd;
+    }
+
+    // Node (cell-type 1): merge stub from right
+    if cell-type == 1 && root.merge-from-right: Rectangle {
+        width: parent.width / 2;
+        height: 2px;
+        x: parent.width / 2;
+        y: (parent.height - self.height) / 2;
+        background: #5599dd;
+    }
+
+    // Node (cell-type 1): dot (always)
+    if cell-type == 1: Rectangle {
+        width: 10px;
+        height: 10px;
+        border-radius: 5px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: #66bbff;
+    }
+
+    // Vertical (cell-type 2): full height line
+    if cell-type == 2: Rectangle {
+        width: 2px;
+        height: parent.height;
+        x: (parent.width - self.width) / 2;
+        background: #5599dd;
+    }
+
+    // MergeLeft (cell-type 3) with line-above: ╯ curve from left-center to top-center
+    if cell-type == 3 && root.line-above: Path {
+        width: parent.width;
+        height: parent.height;
+        stroke: #5599dd;
+        stroke-width: 2px;
+        MoveTo { x: 0; y: 14; }
+        CubicTo { control-1-x: 6; control-1-y: 14; control-2-x: 10; control-2-y: 8; x: 10; y: 0; }
+    }
+
+    // MergeLeft (cell-type 3) without line-above: horizontal line (intermediate)
+    if cell-type == 3 && !root.line-above: Rectangle {
+        width: parent.width;
+        height: 2px;
+        y: (parent.height - self.height) / 2;
+        background: #5599dd;
+    }
+
+    // MergeLeft (cell-type 3) with line-below: vertical line below
+    if cell-type == 3 && root.line-below: Rectangle {
+        width: 2px;
+        height: parent.height / 2;
+        x: (parent.width - self.width) / 2;
+        y: parent.height / 2;
+        background: #5599dd;
+    }
+
+    // MergeRight (cell-type 4) with line-above: ╰ curve from right-center to top-center
+    if cell-type == 4 && root.line-above: Path {
+        width: parent.width;
+        height: parent.height;
+        stroke: #5599dd;
+        stroke-width: 2px;
+        MoveTo { x: 20; y: 14; }
+        CubicTo { control-1-x: 14; control-1-y: 14; control-2-x: 10; control-2-y: 8; x: 10; y: 0; }
+    }
+
+    // MergeRight (cell-type 4) without line-above: horizontal line (intermediate)
+    if cell-type == 4 && !root.line-above: Rectangle {
+        width: parent.width;
+        height: 2px;
+        y: (parent.height - self.height) / 2;
+        background: #5599dd;
+    }
+
+    // MergeRight (cell-type 4) with line-below: vertical line below
+    if cell-type == 4 && root.line-below: Rectangle {
+        width: 2px;
+        height: parent.height / 2;
+        x: (parent.width - self.width) / 2;
+        y: parent.height / 2;
+        background: #5599dd;
+    }
+
+    // Crossing (cell-type 5): full-height vertical line
+    if cell-type == 5: Rectangle {
+        width: 2px;
+        height: parent.height;
+        x: (parent.width - self.width) / 2;
+        background: #5599dd;
+    }
+
+    // Crossing (cell-type 5): full-width horizontal line
+    if cell-type == 5: Rectangle {
+        width: parent.width;
+        height: 2px;
+        y: (parent.height - self.height) / 2;
+        background: #5599dd;
+    }
+}
+
+export component GraphRow inherits Rectangle {
+    in property <LogEntry> entry;
+    height: 28px;
+    background: #2b3a4a;
+
+    HorizontalLayout {
+        spacing: 0px;
+        padding: 0px;
+
+        for cell[index] in root.entry.graph-cells: GraphCellView {
+            cell-type: cell.cell-type;
+            line-above: cell.line-above;
+            line-below: cell.line-below;
+            merge-from-left: cell.merge-from-left;
+            merge-from-right: cell.merge-from-right;
+        }
+
+        Rectangle { width: 8px; }
+
+        Text {
+            text: root.entry.change-id;
+            color: #cc88ff;
+            font-family: "monospace";
+            width: 80px;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+
+        Rectangle { width: 8px; }
+
+        Text {
+            text: root.entry.description;
+            color: #c0c8d0;
+            horizontal-stretch: 1;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+
+        Rectangle { width: 8px; }
+
+        Text {
+            text: root.entry.author;
+            color: #88aa88;
+            width: 120px;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+
+        Rectangle { width: 8px; }
+
+        Text {
+            text: root.entry.timestamp;
+            color: #888888;
+            width: 140px;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+    }
+}

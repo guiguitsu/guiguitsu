@@ -1,16 +1,36 @@
-import { VerticalBox } from "std-widgets.slint";
+import { StacksView } from "components/stacks_view.slint";
+import { DetailPanel } from "components/detail_panel.slint";
+import { BottomBar } from "components/bottom_bar.slint";
+import { StackCommit, Stack } from "types.slint";
+
+export { StackCommit, Stack }
 
 export component App inherits Window {
-    title: "Hello World";
-    preferred-width: 400px;
-    preferred-height: 300px;
+    title: "guiguitsu";
+    preferred-width: 1200px;
+    preferred-height: 800px;
+    background: #1a1a2e;
 
-    VerticalBox {
-        alignment: center;
-        Text {
-            text: "Hello, Slint!";
-            font-size: 24px;
-            horizontal-alignment: center;
+    in property <[Stack]> stacks;
+
+    VerticalLayout {
+        padding: 0px;
+        spacing: 0px;
+
+        HorizontalLayout {
+            padding: 0px;
+            spacing: 0px;
+
+            StacksView {
+                horizontal-stretch: 55;
+                stacks: root.stacks;
+            }
+
+            DetailPanel {
+                horizontal-stretch: 45;
+            }
         }
+
+        BottomBar {}
     }
 }

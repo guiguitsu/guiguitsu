@@ -1,0 +1,3 @@
+{"commit_id":"aaaaaaaa","parents":["xxxxxxxx"],"change_id":"chg_a","description":"orphan A","author":{"name":"Test","email":"t@t","timestamp":"2026-01-01T00:00:00Z"},"committer":{"name":"Test","email":"t@t","timestamp":"2026-01-01T00:00:00Z"}}
+{"commit_id":"bbbbbbbb","parents":["yyyyyyyy"],"change_id":"chg_b","description":"orphan B","author":{"name":"Test","email":"t@t","timestamp":"2026-01-01T00:00:00Z"},"committer":{"name":"Test","email":"t@t","timestamp":"2026-01-01T00:00:00Z"}}
+{"commit_id":"cccccccc","parents":["zzzzzzzz"],"change_id":"chg_c","description":"orphan C","author":{"name":"Test","email":"t@t","timestamp":"2026-01-01T00:00:00Z"},"committer":{"name":"Test","email":"t@t","timestamp":"2026-01-01T00:00:00Z"}}

@@ -1,0 +1,12 @@
+import { Button } from "std-widgets.slint";
+
+export component BottomBar inherits Rectangle {
+    height: 40px;
+    background: #1e1e1e;
+
+    Button {
+        text: "Refresh";
+        x: 8px;
+        y: (parent.height - self.height) / 2;
+    }
+}

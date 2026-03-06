@@ -1,0 +1,14 @@
+import { ListView } from "std-widgets.slint";
+import { LogEntry } from "../types.slint";
+import { GraphRow } from "graph_row.slint";
+
+export component LogView inherits Rectangle {
+    in property <[LogEntry]> entries;
+    background: #2b3a4a;
+
+    ListView {
+        for entry[index] in root.entries: GraphRow {
+            entry: entry;
+        }
+    }
+}

@@ -1,0 +1,37 @@
+import { ScrollView } from "std-widgets.slint";
+import { Stack } from "../types.slint";
+import { CommitCard } from "commit_card.slint";
+
+export component StacksView inherits Rectangle {
+    in property <[Stack]> stacks;
+    background: #1a1a2e;
+
+    ScrollView {
+        HorizontalLayout {
+            padding: 12px;
+            spacing: 12px;
+
+            for stack in root.stacks: Rectangle {
+                width: 280px;
+                background: #1e2a3a;
+                border-radius: 8px;
+
+                VerticalLayout {
+                    padding: 10px;
+                    spacing: 8px;
+
+                    Text {
+                        text: stack.name;
+                        color: #c0c8d0;
+                        font-size: 14px;
+                        font-weight: 700;
+                    }
+
+                    for commit in stack.commits: CommitCard {
+                        commit: commit;
+                    }
+                }
+            }
+        }
+    }
+}
