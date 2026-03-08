@@ -48,3 +48,13 @@ pub fn ensure_user_config(repo_path: &Path) -> Result<()> {
          jj config set --user user.email \"someone@example.com\""
     );
 }
+
+pub fn create_merge_commit(repo_path: &Path, message: &str, shas: &[&str], do_new: bool) -> Result<()> {
+    let mut args = vec!["new", "-m", message];
+    args.extend_from_slice(shas);
+    run_jj(repo_path, &args)?;
+    if do_new {
+        run_jj(repo_path, &["new"])?;
+    }
+    Ok(())
+}

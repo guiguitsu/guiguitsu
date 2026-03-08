@@ -81,7 +81,14 @@ pub fn init_repo(repo_path: &Path, config: &Config) -> Result<()> {
         run_git(repo_path, &["checkout", "-b", &config.workspace_branch, &config.trunk])?;
         run_git(repo_path, &["add", FILE_NAME])?;
         run_git(repo_path, &["commit", "-m", "Add guiguitsu configuration"])?;
-        run_git(repo_path, &["merge", &config.trunk, "--no-ff", "--no-edit"])?;
+        let head = current_head_sha(repo_path)?;
+        let trunk_sha = run_git(repo_path, &["rev-parse", &config.trunk])?;
+        crate::jujutsu::create_merge_commit(
+            repo_path,
+            "Merge trunk into workspace branch",
+            &[&head, &trunk_sha],
+            true,
+        )?;
     }
 
     Ok(())
