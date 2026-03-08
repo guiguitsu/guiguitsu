@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::git_utils;
+
 pub const FILE_NAME: &str = ".guiguitsu.json";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -29,8 +31,10 @@ impl Config {
 
         let contents = fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        serde_json::from_str(&contents)
-            .with_context(|| format!("failed to parse {}", path.display()))
+        let config: Self = serde_json::from_str(&contents)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        config.validate(repo_path)?;
+        Ok(config)
     }
 
     pub fn save(&self, repo_path: &Path) -> Result<()> {
@@ -38,6 +42,11 @@ impl Config {
         let contents = serde_json::to_string_pretty(self).context("failed to serialize config")?;
         fs::write(&path, format!("{contents}\n"))
             .with_context(|| format!("failed to write {}", path.display()))
+    }
+
+    pub fn validate(&self, repo_path: &Path) -> Result<()> {
+        git_utils::ensure_remote_exists(repo_path, &self.workspace_remote)?;
+        git_utils::ensure_remote_branch_exists(repo_path, &self.workspace_remote, &self.trunk)
     }
 
     pub fn base_ref(&self) -> String {

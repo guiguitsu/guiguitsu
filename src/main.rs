@@ -13,8 +13,8 @@ slint::include_modules!();
 fn main() -> Result<()> {
     match parse_command(std::env::args().skip(1).collect())? {
         CliCommand::Init { repo_path, config } => {
-            git_utils::ensure_remote_exists(&repo_path, &config.workspace_remote)?;
-            git_utils::ensure_remote_branch_exists(&repo_path, &config.workspace_remote, &config.trunk)?;
+            git_utils::init_repo(&repo_path)?;
+            config.validate(&repo_path)?;
             config.save(&repo_path)?;
             println!("Wrote {}", Config::path(&repo_path).display());
             Ok(())
@@ -107,10 +107,8 @@ fn parse_run_command(args: &[String]) -> Result<CliCommand> {
 fn run_app(repo_path: PathBuf, print_stacks: bool) -> Result<()> {
     use stacks::{GitStackProvider, StackProvider};
 
+    git_utils::validate_startup_requirements(&repo_path)?;
     let config = Config::load(&repo_path)?;
-    git_utils::ensure_startup_requirements(&repo_path)?;
-    git_utils::ensure_remote_exists(&repo_path, &config.workspace_remote)?;
-    git_utils::ensure_remote_branch_exists(&repo_path, &config.workspace_remote, &config.trunk)?;
     let provider = GitStackProvider::new(repo_path.clone());
     let stacks = provider.get_stacks()?;
 

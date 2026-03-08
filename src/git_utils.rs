@@ -3,6 +3,8 @@ use std::process::Command;
 
 use anyhow::{Context, Result, anyhow};
 
+use crate::config::FILE_NAME;
+
 pub struct CommitInfo {
     pub change_id: String,
     pub commit_id: String,
@@ -47,15 +49,72 @@ fn run_git(repo_path: &Path, args: &[&str]) -> Result<String> {
     run_command("git", args, Some(repo_path))
 }
 
-pub fn ensure_startup_requirements(repo_path: &Path) -> Result<()> {
+fn validate_tool_requirements() -> Result<()> {
     run_command("git", &["--version"], None)?;
     run_command("jj", &["--version"], None)?;
+    Ok(())
+}
+
+pub fn init_repo(repo_path: &Path) -> Result<()> {
+    validate_tool_requirements()?;
+
+    if has_staged_changed(repo_path)? {
+        return Err(anyhow!(
+            "cannot initialize guiguitsu in {} while staged git changes are present",
+            repo_path.display()
+        ));
+    }
 
     if !repo_path.join(".jj").is_dir() {
         run_command("jj", &["git", "init", "--colocate"], Some(repo_path))?;
     }
 
     Ok(())
+}
+
+pub fn validate_startup_requirements(repo_path: &Path) -> Result<()> {
+    validate_tool_requirements()?;
+
+    if !repo_path.join(".jj").is_dir() {
+        return Err(anyhow!(
+            "missing .jj in repo. Run: guiguitsu init --workspace-branch=<branch> --workspace-remote=<remote> --trunk=<main>"
+        ));
+    }
+
+    if !repo_path.join(FILE_NAME).is_file() {
+        return Err(anyhow!(
+            "missing {} in repo. Run: guiguitsu init --workspace-branch=<branch> --workspace-remote=<remote> --trunk=<main>",
+            FILE_NAME
+        ));
+    }
+
+    Ok(())
+}
+
+pub fn has_staged_changed(repo_path: &Path) -> Result<bool> {
+    let output = Command::new("git")
+        .arg("diff-index")
+        .arg("--quiet")
+        .arg("--cached")
+        .arg("HEAD")
+        .arg("--")
+        .current_dir(repo_path)
+        .output()
+        .with_context(|| format!("failed to run git diff-index in {}", repo_path.display()))?;
+
+    match output.status.code() {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        _ => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let details = if !stderr.is_empty() { stderr } else { stdout };
+            Err(anyhow!(
+                "git diff-index --quiet --cached HEAD -- failed in {}: {details}",
+                repo_path.display()
+            ))
+        }
+    }
 }
 
 pub fn ensure_remote_exists(repo_path: &Path, remote: &str) -> Result<()> {
@@ -215,7 +274,7 @@ mod tests {
 
     use anyhow::{Context, Result, anyhow};
 
-    use super::{commits_in_range, current_head_sha, parent_shas};
+    use super::{commits_in_range, current_head_sha, has_staged_changed, init_repo, parent_shas, validate_startup_requirements};
 
     struct TempRepo {
         path: PathBuf,
@@ -323,6 +382,55 @@ mod tests {
         assert!(commits.iter().all(|commit| !commit.author.is_empty()));
         assert!(commits.iter().all(|commit| !commit.timestamp.is_empty()));
         assert!(commits.iter().all(|commit| commit.change_id == commit.commit_id));
+        Ok(())
+    }
+
+    #[test]
+    fn has_staged_changed_returns_false_without_staged_changes() -> Result<()> {
+        let repo = TempRepo::create()?;
+
+        let has_changes = has_staged_changed(&repo.path)?;
+
+        assert!(!has_changes);
+        Ok(())
+    }
+
+    #[test]
+    fn has_staged_changed_returns_true_with_staged_changes() -> Result<()> {
+        let repo = TempRepo::create()?;
+        let file_path = repo.path.join("staged.txt");
+
+        fs::write(&file_path, "staged change\n").context("failed to write staged file")?;
+        git(&repo.path, &["add", "staged.txt"])?;
+
+        let has_changes = has_staged_changed(&repo.path)?;
+
+        assert!(has_changes);
+        Ok(())
+    }
+
+    #[test]
+    fn init_repo_fails_with_staged_changes() -> Result<()> {
+        let repo = TempRepo::create()?;
+        let file_path = repo.path.join("staged.txt");
+
+        fs::write(&file_path, "staged change\n").context("failed to write staged file")?;
+        git(&repo.path, &["add", "staged.txt"])?;
+
+        let error = init_repo(&repo.path).expect_err("expected staged-change bailout");
+
+        assert!(error.to_string().contains("while staged git changes are present"));
+        Ok(())
+    }
+
+    #[test]
+    fn validate_startup_requirements_fails_when_jj_metadata_is_missing() -> Result<()> {
+        let repo = TempRepo::create()?;
+
+        let error = validate_startup_requirements(&repo.path)
+            .expect_err("expected missing .jj bailout");
+
+        assert!(error.to_string().contains("missing .jj in repo"));
         Ok(())
     }
 }
