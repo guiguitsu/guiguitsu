@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 repo_path="${1:-}"
 
 if [ -z "$repo_path" ]; then
@@ -18,6 +20,7 @@ mkdir -p "$repo_path"
 cd "$repo_path"
 
 git init
+git remote add origin https://dummy.com/repo1.git
 git symbolic-ref HEAD refs/heads/main
 git config user.name "Test User"
 git config user.email "test@example.com"
@@ -88,3 +91,5 @@ git commit -m "branch2 commit 2"
 git checkout main
 git merge branch1 branch2 -m "merge branch1 and branch2 into main"
 
+cd "${SCRIPT_DIR}/../.."
+cargo run -- -C "$repo_path" init --workspace-branch=workspace --workspace-remote=origin --trunk=main

@@ -158,16 +158,6 @@ pub fn ensure_remote_exists(repo_path: &Path, remote: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn ensure_remote_branch_exists(repo_path: &Path, remote: &str, branch: &str) -> Result<()> {
-    run_git(repo_path, &["ls-remote", "--exit-code", "--heads", remote, branch]).with_context(|| {
-        format!(
-            "branch '{branch}' does not exist on remote '{remote}' in {}",
-            repo_path.display()
-        )
-    })?;
-    Ok(())
-}
-
 pub fn current_head_sha(repo_path: &Path) -> Result<String> {
     run_git(repo_path, &["rev-parse", "HEAD"])
 }
@@ -382,9 +372,9 @@ mod tests {
     #[test]
     fn parent_shas_returns_three_parents_for_octopus_merge_commit() -> Result<()> {
         let repo = TempRepo::create()?;
-        let head = git(&repo.path, &["rev-parse", "HEAD"])?;
+        let main_sha = git(&repo.path, &["rev-parse", "main"])?;
 
-        let parents = parent_shas(&repo.path, &head)?;
+        let parents = parent_shas(&repo.path, &main_sha)?;
 
         assert_eq!(parents.len(), 3);
         Ok(())
@@ -466,10 +456,20 @@ mod tests {
 
     #[test]
     fn validate_startup_requirements_fails_when_jj_metadata_is_missing() -> Result<()> {
-        let repo = TempRepo::create()?;
+        let mut path = std::env::temp_dir();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("time went backwards")?
+            .as_nanos();
+        path.push(format!("guiguitsu-no-jj-test-{now}-{}", std::process::id()));
+        fs::create_dir_all(&path).context("failed to create temp dir")?;
+        git(&path, &["init"])?;
+        git(&path, &["config", "user.name", "Test"])?;
+        git(&path, &["config", "user.email", "test@example.com"])?;
 
-        let error = validate_startup_requirements(&repo.path)
-            .expect_err("expected missing .jj bailout");
+        let result = validate_startup_requirements(&path);
+        let _ = fs::remove_dir_all(&path);
+        let error = result.expect_err("expected missing .jj bailout");
 
         assert!(error.to_string().contains("missing .jj in repo"));
         Ok(())

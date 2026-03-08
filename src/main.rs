@@ -6,7 +6,7 @@ mod jujutsu;
 
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use config::Config;
 
 slint::include_modules!();
@@ -34,11 +34,24 @@ enum CliCommand {
 }
 
 fn parse_command(args: Vec<String>) -> Result<CliCommand> {
+    let mut args = args.as_slice();
+
+    if args.first().map(String::as_str) == Some("-C") {
+        let path = args.get(1).ok_or_else(|| anyhow::anyhow!("-C requires a path argument"))?;
+        let path = std::path::Path::new(path);
+        if !path.is_dir() {
+            bail!("-C path does not exist or is not a directory: {}", path.display());
+        }
+        std::env::set_current_dir(path)
+            .with_context(|| format!("failed to change directory to {}", path.display()))?;
+        args = &args[2..];
+    }
+
     if args.first().map(String::as_str) == Some("init") {
         return parse_init_command(&args[1..]);
     }
 
-    parse_run_command(&args)
+    parse_run_command(args)
 }
 
 fn parse_init_command(args: &[String]) -> Result<CliCommand> {

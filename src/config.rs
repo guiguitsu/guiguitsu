@@ -45,8 +45,7 @@ impl Config {
     }
 
     pub fn validate(&self, repo_path: &Path) -> Result<()> {
-        git_utils::ensure_remote_exists(repo_path, &self.workspace_remote)?;
-        git_utils::ensure_remote_branch_exists(repo_path, &self.workspace_remote, &self.trunk)
+        git_utils::ensure_remote_exists(repo_path, &self.workspace_remote)
     }
 
     pub fn base_ref(&self) -> String {
