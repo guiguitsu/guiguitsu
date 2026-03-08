@@ -13,7 +13,7 @@ pub struct CommitInfo {
     pub timestamp: String,
 }
 
-fn run_command(command: &str, args: &[&str], current_dir: Option<&Path>) -> Result<String> {
+pub(crate) fn run_command(command: &str, args: &[&str], current_dir: Option<&Path>) -> Result<String> {
     let mut process = Command::new(command);
     if let Some(current_dir) = current_dir {
         process.current_dir(current_dir);
@@ -68,6 +68,8 @@ pub fn init_repo(repo_path: &Path, config: &Config) -> Result<()> {
     if !repo_path.join(".jj").is_dir() {
         run_command("jj", &["git", "init", "--colocate"], Some(repo_path))?;
     }
+
+    crate::jujutsu::ensure_user_config(repo_path)?;
 
     config.validate(repo_path)?;
     config.save(repo_path)?;

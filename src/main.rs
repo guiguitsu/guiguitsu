@@ -2,6 +2,7 @@ mod config;
 mod stacks;
 mod models;
 mod git_utils;
+mod jujutsu;
 
 use std::path::PathBuf;
 
