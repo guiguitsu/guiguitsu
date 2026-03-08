@@ -1,9 +1,9 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 
-use crate::config::FILE_NAME;
+use crate::config::{Config, FILE_NAME};
 
 pub struct CommitInfo {
     pub change_id: String,
@@ -55,7 +55,7 @@ fn validate_tool_requirements() -> Result<()> {
     Ok(())
 }
 
-pub fn init_repo(repo_path: &Path) -> Result<()> {
+pub fn init_repo(repo_path: &Path, config: &Config) -> Result<()> {
     validate_tool_requirements()?;
 
     if has_staged_changed(repo_path)? {
@@ -69,7 +69,33 @@ pub fn init_repo(repo_path: &Path) -> Result<()> {
         run_command("jj", &["git", "init", "--colocate"], Some(repo_path))?;
     }
 
+    config.validate(repo_path)?;
+    config.save(repo_path)?;
+
+    if has_file_changes(repo_path, FILE_NAME)? {
+        if local_branch_exists(repo_path, &config.workspace_branch)? {
+            bail!("workspace branch '{}' already exists", config.workspace_branch);
+        }
+        run_git(repo_path, &["checkout", "-b", &config.workspace_branch, &config.trunk])?;
+        run_git(repo_path, &["add", FILE_NAME])?;
+        run_git(repo_path, &["commit", "-m", "Add guiguitsu configuration"])?;
+        run_git(repo_path, &["merge", &config.trunk, "--no-edit"])?;
+    }
+
     Ok(())
+}
+
+fn has_file_changes(repo_path: &Path, file_name: &str) -> Result<bool> {
+    let output = run_git(repo_path, &["status", "--porcelain", "--", file_name])?;
+    Ok(!output.is_empty())
+}
+
+fn local_branch_exists(repo_path: &Path, branch: &str) -> Result<bool> {
+    let ref_name = format!("refs/heads/{branch}");
+    match run_git(repo_path, &["rev-parse", "--verify", &ref_name]) {
+        Ok(_) => Ok(true),
+        Err(_) => Ok(false),
+    }
 }
 
 pub fn validate_startup_requirements(repo_path: &Path) -> Result<()> {
@@ -274,6 +300,7 @@ mod tests {
 
     use anyhow::{Context, Result, anyhow};
 
+    use crate::config::Config;
     use super::{commits_in_range, current_head_sha, has_staged_changed, init_repo, parent_shas, validate_startup_requirements};
 
     struct TempRepo {
@@ -417,7 +444,12 @@ mod tests {
         fs::write(&file_path, "staged change\n").context("failed to write staged file")?;
         git(&repo.path, &["add", "staged.txt"])?;
 
-        let error = init_repo(&repo.path).expect_err("expected staged-change bailout");
+        let config = Config {
+            workspace_branch: "guiguitsu/test".to_string(),
+            workspace_remote: "origin".to_string(),
+            trunk: "main".to_string(),
+        };
+        let error = init_repo(&repo.path, &config).expect_err("expected staged-change bailout");
 
         assert!(error.to_string().contains("while staged git changes are present"));
         Ok(())

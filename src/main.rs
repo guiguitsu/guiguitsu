@@ -13,9 +13,7 @@ slint::include_modules!();
 fn main() -> Result<()> {
     match parse_command(std::env::args().skip(1).collect())? {
         CliCommand::Init { repo_path, config } => {
-            git_utils::init_repo(&repo_path)?;
-            config.validate(&repo_path)?;
-            config.save(&repo_path)?;
+            git_utils::init_repo(&repo_path, &config)?;
             println!("Wrote {}", Config::path(&repo_path).display());
             Ok(())
         }
