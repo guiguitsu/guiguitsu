@@ -1,0 +1,33 @@
+import { ListView } from "std-widgets.slint";
+import { DiffLine } from "../types.slint";
+
+export component DiffViewer inherits Rectangle {
+    in property <[DiffLine]> lines;
+    background: #141e14;
+
+    ListView {
+        for line in root.lines: Rectangle {
+            height: line.kind == 3 ? 24px : 19px;
+            background: line.kind == 1 ? #284428
+                      : line.kind == 2 ? #442828
+                      : line.kind == 3 ? #1e1e2e
+                      : transparent;
+
+            Text {
+                x: 6px;
+                y: 0px;
+                width: parent.width - 12px;
+                height: parent.height;
+                text: line.content;
+                color: line.kind == 1 ? #88cc88
+                     : line.kind == 2 ? #cc8888
+                     : line.kind == 3 ? #8888dd
+                     : #c0c8d0;
+                font-family: "monospace";
+                font-size: 12px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+}

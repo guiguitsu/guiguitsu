@@ -10,3 +10,10 @@ export struct Stack {
     name: string,
     commits: [StackCommit],
 }
+
+// kind: 0 = context, 1 = addition, 2 = deletion, 3 = hunk header
+export struct DiffLine {
+    content: string,
+    kind: int,
+    hunk-id: int,
+}

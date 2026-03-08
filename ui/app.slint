@@ -1,9 +1,10 @@
 import { StacksView } from "components/stacks_view.slint";
 import { DetailPanel } from "components/detail_panel.slint";
 import { BottomBar } from "components/bottom_bar.slint";
-import { StackCommit, Stack } from "types.slint";
+import { StackCommit, Stack, DiffLine } from "types.slint";
+import { Button, LineEdit } from "std-widgets.slint";
 
-export { StackCommit, Stack }
+export { StackCommit, Stack, DiffLine }
 
 export component App inherits Window {
     title: "guiguitsu";
@@ -12,6 +13,12 @@ export component App inherits Window {
     background: #1a1a2e;
 
     in property <[Stack]> stacks;
+    in property <[DiffLine]> diff-lines;
+    callback select-commit(string);
+    callback add-branch(string);
+
+    property <bool> show-add-branch-dialog: false;
+    property <string> new-branch-name: "";
 
     VerticalLayout {
         padding: 0px;
@@ -24,13 +31,82 @@ export component App inherits Window {
             StacksView {
                 horizontal-stretch: 55;
                 stacks: root.stacks;
+                commit-selected(id) => { root.select-commit(id); }
             }
 
             DetailPanel {
                 horizontal-stretch: 45;
+                diff-lines: root.diff-lines;
             }
         }
 
-        BottomBar {}
+        BottomBar {
+            add-branch-clicked => { root.show-add-branch-dialog = true; }
+        }
+    }
+
+    if root.show-add-branch-dialog: Rectangle {
+        background: #00000099;
+        x: 0; y: 0;
+        width: root.width;
+        height: root.height;
+
+        Rectangle {
+            width: 320px;
+            height: 150px;
+            background: #1e2a3a;
+            border-radius: 8px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            drop-shadow-blur: 20px;
+            drop-shadow-color: #000000aa;
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 12px;
+
+                Text {
+                    text: "New branch name:";
+                    color: #c0c8d0;
+                    font-size: 13px;
+                }
+
+                LineEdit {
+                    placeholder-text: "branch-name";
+                    text <=> root.new-branch-name;
+                    accepted(text) => {
+                        if text != "" {
+                            root.add-branch(text);
+                        }
+                        root.show-add-branch-dialog = false;
+                        root.new-branch-name = "";
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+
+                    Button {
+                        text: "Cancel";
+                        clicked => {
+                            root.show-add-branch-dialog = false;
+                            root.new-branch-name = "";
+                        }
+                    }
+
+                    Button {
+                        text: "Add";
+                        clicked => {
+                            if root.new-branch-name != "" {
+                                root.add-branch(root.new-branch-name);
+                            }
+                            root.show-add-branch-dialog = false;
+                            root.new-branch-name = "";
+                        }
+                    }
+                }
+            }
+        }
     }
 }

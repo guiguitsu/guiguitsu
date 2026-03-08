@@ -2,10 +2,15 @@ import { StackCommit } from "../types.slint";
 
 export component CommitCard inherits Rectangle {
     in property <StackCommit> commit;
+    callback clicked(string);
 
     height: 90px;
     background: #2b3a4a;
     border-radius: 6px;
+
+    TouchArea {
+        clicked => { root.clicked(root.commit.commit-id); }
+    }
 
     VerticalLayout {
         padding: 10px;

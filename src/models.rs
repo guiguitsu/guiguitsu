@@ -1,8 +1,9 @@
 use std::rc::Rc;
 use slint::{ModelRc, VecModel, SharedString};
 
+use crate::git_utils;
 use crate::stacks::StackInfo;
-use crate::{Stack, StackCommit};
+use crate::{DiffLine, Stack, StackCommit};
 
 pub fn build_stacks_model(stacks: &[StackInfo]) -> ModelRc<Stack> {
     let slint_stacks: Vec<Stack> = stacks
@@ -28,4 +29,16 @@ pub fn build_stacks_model(stacks: &[StackInfo]) -> ModelRc<Stack> {
         .collect();
 
     ModelRc::from(Rc::new(VecModel::from(slint_stacks)))
+}
+
+pub fn build_diff_model(lines: &[git_utils::DiffLine]) -> ModelRc<DiffLine> {
+    let slint_lines: Vec<DiffLine> = lines
+        .iter()
+        .map(|l| DiffLine {
+            content: SharedString::from(l.content.as_str()),
+            kind: l.kind,
+            hunk_id: l.hunk_id,
+        })
+        .collect();
+    ModelRc::from(Rc::new(VecModel::from(slint_lines)))
 }

@@ -1,11 +1,13 @@
+import { DiffViewer } from "diff_viewer.slint";
+import { DiffLine } from "../types.slint";
+
 export component DetailPanel inherits Rectangle {
+    in property <[DiffLine]> diff-lines;
     background: #2a3d3d;
 
-    Text {
-        text: "Detail Panel";
-        color: #c0c8d0;
-        font-size: 18px;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+    DiffViewer {
+        width: parent.width;
+        height: parent.height;
+        lines: root.diff-lines;
     }
 }

@@ -1,0 +1,3 @@
+At startup, check if `git --version` and `jj --version` works, bail out if not. If .jj directory doesnt exist, then run `jj init --colocate`
+
+  

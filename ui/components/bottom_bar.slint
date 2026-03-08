@@ -3,10 +3,24 @@ import { Button } from "std-widgets.slint";
 export component BottomBar inherits Rectangle {
     height: 40px;
     background: #1e1e1e;
+    callback add-branch-clicked();
 
-    Button {
-        text: "Refresh";
-        x: 8px;
-        y: (parent.height - self.height) / 2;
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        alignment: start;
+
+        Button {
+            text: "Refresh";
+            y: (parent.height - self.height) / 2;
+        }
+
+        Rectangle { width: 8px; }
+
+        Button {
+            text: "Add Branch";
+            y: (parent.height - self.height) / 2;
+            clicked => { root.add-branch-clicked(); }
+        }
     }
 }
