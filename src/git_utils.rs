@@ -377,7 +377,7 @@ mod tests {
     use anyhow::{Context, Result, anyhow};
 
     use crate::config::Config;
-    use super::{commits_in_range, current_head_sha, find_commit_by_description, has_staged_changed, init_repo, parent_shas, run_command, run_git, validate_startup_requirements};
+    use super::{commits_in_range, create_branch, current_head_sha, find_commit_by_description, has_staged_changed, init_repo, parent_shas, run_command, run_git, validate_startup_requirements};
 
     struct TempRepo {
         path: PathBuf,
@@ -586,6 +586,20 @@ mod tests {
         let error = result.expect_err("expected missing .jj bailout");
 
         assert!(error.to_string().contains("missing .jj in repo"));
+        Ok(())
+    }
+
+    #[test]
+    fn add_branch_creates_local_branch_at_trunk() -> Result<()> {
+        let repo = TempRepo::create()?;
+
+        // on_add_branch uses config.trunk ("main") as the start point.
+        // Verify the branch is created and points at the same commit as main.
+        create_branch(&repo.path, "v1", "main")?;
+
+        let v1_sha = run_git(&repo.path, &["rev-parse", "v1"])?;
+        let main_sha = run_git(&repo.path, &["rev-parse", "main"])?;
+        assert_eq!(v1_sha, main_sha, "v1 should point at the same commit as main");
         Ok(())
     }
 }

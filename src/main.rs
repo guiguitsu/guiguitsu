@@ -243,18 +243,13 @@ fn run_app(repo_path: PathBuf, print_stacks: bool) -> Result<()> {
     });
 
     app.on_add_branch({
-        let base_ref = config.base_ref();
         let repo_path = repo_path.clone();
+        let reload = Rc::clone(&reload);
         move |branch_name| {
-            let status = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo_path)
-                .args(["branch", branch_name.as_str(), base_ref.as_str()])
-                .status();
-            match status {
-                Ok(s) if !s.success() => eprintln!("git branch {branch_name} {base_ref} failed"),
-                Err(e) => eprintln!("failed to run git: {e}"),
-                _ => {}
+            if let Err(e) = apply_branch(repo_path.clone(), branch_name.to_string()) {
+                eprintln!("apply_branch failed: {e}");
+            } else {
+                reload();
             }
         }
     });
