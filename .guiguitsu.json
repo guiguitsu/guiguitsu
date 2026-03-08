@@ -1,0 +1,17 @@
+{
+  "workspace_branch": "workspace",
+  "workspace_remote": "origin",
+  "trunk": "main",
+  "stacks": [
+    {
+      "name": "workspace",
+      "local_branch": "workspace",
+      "remote_branch": "workspace@origin"
+    },
+    {
+      "name": "main",
+      "remote_branch": "main@origin"
+    }
+  ],
+  "merge_commit": "pnuukvnl"
+}
