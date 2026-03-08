@@ -18,6 +18,7 @@ pub fn build_stacks_model(stacks: &[StackInfo]) -> ModelRc<Stack> {
                     description: SharedString::from(c.description.as_str()),
                     author: SharedString::from(c.author.as_str()),
                     timestamp: SharedString::from(c.timestamp.as_str()),
+                    is_conflicted: c.is_conflicted(),
                 })
                 .collect();
 

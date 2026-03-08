@@ -16,6 +16,8 @@ export component App inherits Window {
     in property <[DiffLine]> diff-lines;
     callback select-commit(string);
     callback add-branch(string);
+    callback abandon-commit(string);
+    callback refresh();
 
     property <bool> show-add-branch-dialog: false;
     property <string> new-branch-name: "";
@@ -31,7 +33,8 @@ export component App inherits Window {
             StacksView {
                 horizontal-stretch: 55;
                 stacks: root.stacks;
-                commit-selected(id) => { root.select-commit(id); }
+                commit-selected(id)   => { root.select-commit(id); }
+                abandon-requested(id) => { root.abandon-commit(id); }
             }
 
             DetailPanel {
@@ -42,6 +45,7 @@ export component App inherits Window {
 
         BottomBar {
             add-branch-clicked => { root.show-add-branch-dialog = true; }
+            refresh-clicked    => { root.refresh(); }
         }
     }
 

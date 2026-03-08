@@ -3,13 +3,58 @@ import { StackCommit } from "../types.slint";
 export component CommitCard inherits Rectangle {
     in property <StackCommit> commit;
     callback clicked(string);
+    callback abandon-requested(string);
 
     height: 90px;
-    background: #2b3a4a;
+    background: root.commit.is-conflicted ? #4a2b2b : #2b3a4a;
     border-radius: 6px;
+
+    popup := PopupWindow {
+        x: 0px;
+        y: root.height;
+        width: 160px;
+        height: 76px;
+
+        Rectangle {
+            background: #1e2a3a;
+            border-radius: 4px;
+            drop-shadow-blur: 8px;
+            drop-shadow-color: #00000088;
+
+            VerticalLayout {
+                padding: 0px;
+                spacing: 0px;
+
+                diff-area := TouchArea {
+                    height: 38px;
+                    Rectangle {
+                        background: diff-area.has-hover ? #2b3d50 : transparent;
+                        border-radius: 4px;
+                        Text { x: 12px; y: (parent.height - self.height) / 2; text: "View Diff"; color: #e0e8f0; font-size: 13px; }
+                    }
+                    clicked => { root.clicked(root.commit.commit-id); }
+                }
+
+                abandon-area := TouchArea {
+                    height: 38px;
+                    Rectangle {
+                        background: abandon-area.has-hover ? #3d2020 : transparent;
+                        border-radius: 4px;
+                        Text { x: 12px; y: (parent.height - self.height) / 2; text: "Abandon"; color: #ff6b6b; font-size: 13px; }
+                    }
+                    clicked => { root.abandon-requested(root.commit.commit-id); }
+                }
+            }
+        }
+    }
 
     TouchArea {
         clicked => { root.clicked(root.commit.commit-id); }
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.up) {
+                popup.show();
+            }
+        }
     }
 
     VerticalLayout {

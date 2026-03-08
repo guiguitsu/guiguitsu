@@ -11,6 +11,13 @@ pub struct CommitInfo {
     pub description: String,
     pub author: String,
     pub timestamp: String,
+    pub changed_files: Vec<String>,
+}
+
+impl CommitInfo {
+    pub fn is_conflicted(&self) -> bool {
+        self.changed_files.iter().any(|f| f.contains(".jjconflict"))
+    }
 }
 
 pub(crate) fn run_command(command: &str, args: &[&str], current_dir: Option<&Path>) -> Result<String> {
@@ -85,7 +92,7 @@ pub fn init_repo(repo_path: &Path, config: &Config) -> Result<()> {
         let trunk_sha = run_git(repo_path, &["rev-parse", &config.trunk])?;
         crate::jujutsu::create_merge_commit(
             repo_path,
-            "Merge trunk into workspace branch",
+            "Special workspace merge commit",
             &[&head, &trunk_sha],
             true,
         )?;
@@ -99,7 +106,7 @@ fn has_file_changes(repo_path: &Path, file_name: &str) -> Result<bool> {
     Ok(!output.is_empty())
 }
 
-fn local_branch_exists(repo_path: &Path, branch: &str) -> Result<bool> {
+pub(crate) fn local_branch_exists(repo_path: &Path, branch: &str) -> Result<bool> {
     let ref_name = format!("refs/heads/{branch}");
     match run_git(repo_path, &["rev-parse", "--verify", &ref_name]) {
         Ok(_) => Ok(true),
@@ -162,6 +169,46 @@ pub fn current_head_sha(repo_path: &Path) -> Result<String> {
     run_git(repo_path, &["rev-parse", "HEAD"])
 }
 
+/// Returns true if `sha` is an ancestor of `of_ref` (or equal to it).
+pub fn is_ancestor(repo_path: &Path, sha: &str, of_ref: &str) -> Result<bool> {
+    let output = Command::new("git")
+        .current_dir(repo_path)
+        .args(["merge-base", "--is-ancestor", sha, of_ref])
+        .output()
+        .with_context(|| format!("failed to run git merge-base in {}", repo_path.display()))?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            Err(anyhow!("git merge-base --is-ancestor failed: {stderr}"))
+        }
+    }
+}
+
+pub fn resolve_ref(repo_path: &Path, git_ref: &str) -> Result<String> {
+    run_git(repo_path, &["rev-parse", git_ref])
+}
+
+pub fn create_branch(repo_path: &Path, branch: &str, start_point: &str) -> Result<()> {
+    run_git(repo_path, &["branch", branch, start_point])?;
+    Ok(())
+}
+
+pub fn find_workspace_merge_commit(repo_path: &Path) -> Result<(String, Vec<String>)> {
+    let mut sha = current_head_sha(repo_path)?;
+    loop {
+        let parents = parent_shas(repo_path, &sha)?;
+        if parents.len() >= 2 {
+            return Ok((sha, parents));
+        }
+        match parents.into_iter().next() {
+            Some(p) => sha = p,
+            None => bail!("no merge commit found in workspace history"),
+        }
+    }
+}
+
 pub fn parent_shas(repo_path: &Path, commit_sha: &str) -> Result<Vec<String>> {
     let output = run_git(repo_path, &["rev-list", "--parents", "-n", "1", commit_sha])?;
     let mut parts = output.split_whitespace();
@@ -187,40 +234,70 @@ pub fn branch_name_for(repo_path: &Path, sha: &str) -> Result<String> {
 
 pub fn commits_in_range(repo_path: &Path, from_sha: &str, to_sha: &str) -> Result<Vec<CommitInfo>> {
     let range = format!("{from_sha}..{to_sha}");
+    // Use a recognizable prefix so that commit headers can be distinguished from
+    // the file list that --name-only appends after a blank line.  The \x1e record
+    // separator cannot be used here because git emits it *before* the file list,
+    // so splitting on it would separate each header from its own files.
     let output = run_git(
         repo_path,
         &[
             "log",
-            "--format=%H%x1f%an%x1f%ai%x1f%s%x1e",
+            "--name-only",
+            "--format=COMMIT:\x1f%H\x1f%an\x1f%ai\x1f%s",
             &range,
         ],
     )?;
 
-    let commits = output
-        .split('\x1e')
-        .filter_map(|entry| {
-            let entry = entry.trim();
-            if entry.is_empty() {
-                return None;
+    let mut commits: Vec<CommitInfo> = Vec::new();
+    let mut current: Option<CommitInfo> = None;
+
+    for line in output.lines() {
+        if let Some(rest) = line.strip_prefix("COMMIT:\x1f") {
+            if let Some(c) = current.take() {
+                commits.push(c);
             }
-
-            let mut fields = entry.split('\x1f');
-            let commit_id = fields.next()?.trim().to_string();
-            let author = fields.next()?.trim().to_string();
-            let timestamp = fields.next()?.trim().to_string();
-            let description = fields.next()?.trim().to_string();
-
-            Some(CommitInfo {
+            let mut fields = rest.splitn(4, '\x1f');
+            let commit_id = fields.next().unwrap_or("").trim().to_string();
+            let author = fields.next().unwrap_or("").trim().to_string();
+            let timestamp = fields.next().unwrap_or("").trim().to_string();
+            let description = fields.next().unwrap_or("").trim().to_string();
+            current = Some(CommitInfo {
                 change_id: commit_id.clone(),
                 commit_id,
                 description,
                 author,
                 timestamp,
-            })
-        })
-        .collect();
+                changed_files: Vec::new(),
+            });
+        } else {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                if let Some(ref mut c) = current {
+                    c.changed_files.push(trimmed.to_string());
+                }
+            }
+        }
+    }
+    if let Some(c) = current {
+        commits.push(c);
+    }
 
     Ok(commits)
+}
+
+/// Find the SHA of the commit whose subject line exactly matches `description`.
+/// Searches all refs (`git log --all`).
+pub fn find_commit_by_description(repo_path: &Path, description: &str) -> Result<String> {
+    let output = run_git(repo_path, &["log", "--all", "--format=%H\x1f%s"])?;
+    for line in output.lines() {
+        let mut parts = line.splitn(2, '\x1f');
+        let sha = parts.next().unwrap_or("").trim();
+        let msg = parts.next().unwrap_or("").trim();
+        if msg == description {
+            return Ok(sha.to_string());
+        }
+    }
+    bail!("no commit found with description: {description}")
 }
 
 pub struct DiffLine {
@@ -300,7 +377,7 @@ mod tests {
     use anyhow::{Context, Result, anyhow};
 
     use crate::config::Config;
-    use super::{commits_in_range, current_head_sha, has_staged_changed, init_repo, parent_shas, validate_startup_requirements};
+    use super::{commits_in_range, current_head_sha, find_commit_by_description, has_staged_changed, init_repo, parent_shas, run_command, run_git, validate_startup_requirements};
 
     struct TempRepo {
         path: PathBuf,
@@ -366,17 +443,6 @@ mod tests {
         let actual = current_head_sha(&repo.path)?;
 
         assert_eq!(actual, expected);
-        Ok(())
-    }
-
-    #[test]
-    fn parent_shas_returns_three_parents_for_octopus_merge_commit() -> Result<()> {
-        let repo = TempRepo::create()?;
-        let main_sha = git(&repo.path, &["rev-parse", "main"])?;
-
-        let parents = parent_shas(&repo.path, &main_sha)?;
-
-        assert_eq!(parents.len(), 3);
         Ok(())
     }
 
@@ -451,6 +517,54 @@ mod tests {
         let error = init_repo(&repo.path, &config).expect_err("expected staged-change bailout");
 
         assert!(error.to_string().contains("while staged git changes are present"));
+        Ok(())
+    }
+
+    #[test]
+    fn is_conflicted_returns_true_after_abandoning_parent_commit() -> Result<()> {
+        let repo = TempRepo::create()?;
+
+        let abandon_sha = find_commit_by_description(&repo.path, "add main.cpp with hello world")?;
+        run_command(
+            "jj",
+            &["--no-pager", "--ignore-working-copy", "abandon", &abandon_sha],
+            Some(&repo.path),
+        )?;
+
+        // After abandon, git history contains both the old and the new (rebased)
+        // SHA for "use std::format in main.cpp". Find the one that is conflicted
+        // by checking which SHA has .jjconflict files in its diff.
+        let all_log = run_git(&repo.path, &["log", "--all", "--format=%H\x1f%s"])?;
+        let conflicted_sha = all_log
+            .lines()
+            .find_map(|line: &str| {
+                let mut parts = line.splitn(2, '\x1f');
+                let sha = parts.next()?.trim();
+                let msg = parts.next()?.trim();
+                if msg != "use std::format in main.cpp" {
+                    return None;
+                }
+                let files = run_git(&repo.path, &["diff-tree", "--no-commit-id", "-r", "--name-only", sha]).ok()?;
+                if files.lines().any(|f: &str| f.contains(".jjconflict")) {
+                    Some(sha.to_string())
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| anyhow!("no conflicted SHA found for 'use std::format in main.cpp'"))?;
+
+        let parent_sha = parent_shas(&repo.path, &conflicted_sha)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("conflicted commit has no parent"))?;
+
+        let commits = commits_in_range(&repo.path, &parent_sha, &conflicted_sha)?;
+        let commit = commits
+            .iter()
+            .find(|c| c.description == "use std::format in main.cpp")
+            .ok_or_else(|| anyhow!("commit not found in range"))?;
+
+        assert!(commit.is_conflicted(), "expected commit to be conflicted after abandoning its parent");
         Ok(())
     }
 

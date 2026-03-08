@@ -5,6 +5,7 @@ import { CommitCard } from "commit_card.slint";
 export component StacksView inherits Rectangle {
     in property <[Stack]> stacks;
     callback commit-selected(string);
+    callback abandon-requested(string);
     background: #1a1a2e;
 
     ScrollView {
@@ -30,7 +31,8 @@ export component StacksView inherits Rectangle {
 
                     for commit in stack.commits: CommitCard {
                         commit: commit;
-                        clicked(id) => { root.commit-selected(id); }
+                        clicked(id)           => { root.commit-selected(id); }
+                        abandon-requested(id) => { root.abandon-requested(id); }
                     }
                 }
             }

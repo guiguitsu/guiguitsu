@@ -4,6 +4,7 @@ export component BottomBar inherits Rectangle {
     height: 40px;
     background: #1e1e1e;
     callback add-branch-clicked();
+    callback refresh-clicked();
 
     HorizontalLayout {
         padding-left: 8px;
@@ -13,6 +14,7 @@ export component BottomBar inherits Rectangle {
         Button {
             text: "Refresh";
             y: (parent.height - self.height) / 2;
+            clicked => { root.refresh-clicked(); }
         }
 
         Rectangle { width: 8px; }

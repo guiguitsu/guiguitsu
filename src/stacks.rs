@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
-use crate::git_utils::{CommitInfo, branch_name_for, commits_in_range, current_head_sha, parent_shas};
+use crate::git_utils::{CommitInfo, branch_name_for, commits_in_range, current_head_sha, is_ancestor, parent_shas};
 
 pub struct StackInfo {
     pub name: String,
@@ -15,11 +15,12 @@ pub trait StackProvider {
 
 pub struct GitStackProvider {
     repo_path: PathBuf,
+    trunk: String,
 }
 
 impl GitStackProvider {
-    pub fn new(repo_path: PathBuf) -> Self {
-        Self { repo_path }
+    pub fn new(repo_path: PathBuf, trunk: String) -> Self {
+        Self { repo_path, trunk }
     }
 }
 
@@ -39,13 +40,18 @@ impl StackProvider for GitStackProvider {
             }
         };
 
-        let main_parent = parents.last().unwrap().clone();
+        let trunk_parent = parents
+            .iter()
+            .find(|p| is_ancestor(&self.repo_path, p, &self.trunk).unwrap_or(false))
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("no trunk parent found among merge commit parents"))?;
+
         let mut stacks = Vec::new();
 
-        for branch_parent in &parents[..parents.len() - 1] {
+        for branch_parent in parents.iter().filter(|p| *p != &trunk_parent) {
             let name = branch_name_for(&self.repo_path, branch_parent)
                 .unwrap_or_else(|_| branch_parent[..branch_parent.len().min(8)].to_string());
-            let commits = commits_in_range(&self.repo_path, &main_parent, branch_parent)?;
+            let commits = commits_in_range(&self.repo_path, &trunk_parent, branch_parent)?;
             stacks.push(StackInfo { name, commits });
         }
 
@@ -103,7 +109,7 @@ mod tests {
     #[test]
     fn get_stacks_returns_two_stacks_from_repo1() -> Result<()> {
         let repo = TempRepo::create()?;
-        let provider = GitStackProvider::new(repo.path.clone());
+        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string());
 
         let stacks = provider.get_stacks()?;
 
@@ -114,7 +120,7 @@ mod tests {
     #[test]
     fn get_stacks_returns_correct_stack_names_from_repo1() -> Result<()> {
         let repo = TempRepo::create()?;
-        let provider = GitStackProvider::new(repo.path.clone());
+        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string());
 
         let stacks = provider.get_stacks()?;
 

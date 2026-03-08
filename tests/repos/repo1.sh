@@ -89,7 +89,6 @@ git add branch2.txt
 git commit -m "branch2 commit 2"
 
 git checkout main
-git merge branch1 branch2 -m "merge branch1 and branch2 into main"
 
 cd "${SCRIPT_DIR}/../.."
 cargo run -- -C "$repo_path" init --workspace-branch=workspace --workspace-remote=origin --trunk=main

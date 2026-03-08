@@ -5,6 +5,7 @@ mod git_utils;
 mod jujutsu;
 
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use anyhow::{Context, Result, bail};
 use config::Config;
@@ -13,16 +14,43 @@ slint::include_modules!();
 
 fn main() -> Result<()> {
     match parse_command(std::env::args().skip(1).collect())? {
+        CliCommand::Help => {
+            print_help();
+            Ok(())
+        }
         CliCommand::Init { repo_path, config } => {
             git_utils::init_repo(&repo_path, &config)?;
             println!("Wrote {}", Config::path(&repo_path).display());
             Ok(())
         }
         CliCommand::Run { repo_path, print_stacks } => run_app(repo_path, print_stacks),
+        CliCommand::ApplyBranch { repo_path, branch_name } => apply_branch(repo_path, branch_name),
     }
 }
 
+fn print_help() {
+    print!(
+        "\
+Usage: guiguitsu [-C <path>] [OPTIONS] [<repo-path>]
+       guiguitsu [-C <path>] init [<repo-path>] --workspace-branch=<branch> --workspace-remote=<remote> --trunk=<branch>
+
+Options:
+  -C <path>                        Change to <path> before doing anything
+  --apply-branch <branch>          Add <branch> as a parent of the workspace merge commit,
+                                   creating it off trunk if it does not exist
+  --print-stacks                   Print stacks to stdout and exit (no GUI)
+  --help                           Show this help message
+
+Init options:
+  --workspace-branch=<branch>      Name of the workspace branch to create
+  --workspace-remote=<remote>      Name of the git remote (e.g. origin)
+  --trunk=<branch>                 Name of the trunk branch (e.g. main)
+"
+    );
+}
+
 enum CliCommand {
+    Help,
     Init {
         repo_path: PathBuf,
         config: Config,
@@ -30,6 +58,10 @@ enum CliCommand {
     Run {
         repo_path: PathBuf,
         print_stacks: bool,
+    },
+    ApplyBranch {
+        repo_path: PathBuf,
+        branch_name: String,
     },
 }
 
@@ -45,6 +77,10 @@ fn parse_command(args: Vec<String>) -> Result<CliCommand> {
         std::env::set_current_dir(path)
             .with_context(|| format!("failed to change directory to {}", path.display()))?;
         args = &args[2..];
+    }
+
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        return Ok(CliCommand::Help);
     }
 
     if args.first().map(String::as_str) == Some("init") {
@@ -99,21 +135,59 @@ fn parse_init_command(args: &[String]) -> Result<CliCommand> {
 fn parse_run_command(args: &[String]) -> Result<CliCommand> {
     let mut repo_arg: Option<PathBuf> = None;
     let mut print_stacks = false;
+    let mut apply_branch: Option<String> = None;
 
-    for arg in args {
-        match arg.as_str() {
-            "--print-stacks" => print_stacks = true,
-            _ if arg.starts_with("--") => bail!("unknown argument: {arg}"),
-            _ if repo_arg.replace(PathBuf::from(arg)).is_some() => bail!("unexpected argument: {arg}"),
-            _ => {}
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--print-stacks" {
+            print_stacks = true;
+        } else if let Some(val) = arg.strip_prefix("--apply-branch=") {
+            if val.is_empty() {
+                bail!("--apply-branch cannot be empty");
+            }
+            apply_branch = Some(val.to_string());
+        } else if arg == "--apply-branch" {
+            i += 1;
+            let val = args.get(i).ok_or_else(|| anyhow::anyhow!("--apply-branch requires a branch name"))?;
+            if val.is_empty() {
+                bail!("--apply-branch cannot be empty");
+            }
+            apply_branch = Some(val.to_string());
+        } else if arg.starts_with("--") {
+            bail!("unknown argument: {arg}");
+        } else if repo_arg.replace(PathBuf::from(arg)).is_some() {
+            bail!("unexpected argument: {arg}");
         }
+        i += 1;
     }
 
-    Ok(CliCommand::Run {
-        repo_path: repo_arg
-            .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory")),
-        print_stacks,
-    })
+    let repo_path = repo_arg
+        .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory"));
+
+    if let Some(branch_name) = apply_branch {
+        return Ok(CliCommand::ApplyBranch { repo_path, branch_name });
+    }
+
+    Ok(CliCommand::Run { repo_path, print_stacks })
+}
+
+fn apply_branch(repo_path: PathBuf, branch_name: String) -> Result<()> {
+    git_utils::validate_startup_requirements(&repo_path)?;
+    let config = Config::load(&repo_path)?;
+
+    if !git_utils::local_branch_exists(&repo_path, &branch_name)? {
+        git_utils::create_branch(&repo_path, &branch_name, &config.trunk)?;
+    }
+
+    let (merge_sha, mut parents) = git_utils::find_workspace_merge_commit(&repo_path)?;
+    let branch_head = git_utils::resolve_ref(&repo_path, &branch_name)?;
+    parents.push(branch_head);
+
+    let new_merge_sha = jujutsu::rebase_merge_commit(&repo_path, &merge_sha, &parents)?;
+    // After rebase the working copy may have moved; park it back on top of the merge commit.
+    jujutsu::new_at(&repo_path, &new_merge_sha)?;
+    Ok(())
 }
 
 fn run_app(repo_path: PathBuf, print_stacks: bool) -> Result<()> {
@@ -121,7 +195,7 @@ fn run_app(repo_path: PathBuf, print_stacks: bool) -> Result<()> {
 
     git_utils::validate_startup_requirements(&repo_path)?;
     let config = Config::load(&repo_path)?;
-    let provider = GitStackProvider::new(repo_path.clone());
+    let provider = GitStackProvider::new(repo_path.clone(), config.trunk.clone());
     let stacks = provider.get_stacks()?;
 
     if print_stacks {
@@ -137,6 +211,36 @@ fn run_app(repo_path: PathBuf, print_stacks: bool) -> Result<()> {
     let model = models::build_stacks_model(&stacks);
     let app = App::new()?;
     app.set_stacks(model);
+
+    let reload: Rc<dyn Fn()> = {
+        let app_weak = app.as_weak();
+        let repo_path = repo_path.clone();
+        let trunk = config.trunk.clone();
+        Rc::new(move || {
+            let app = match app_weak.upgrade() { Some(a) => a, None => return };
+            let provider = GitStackProvider::new(repo_path.clone(), trunk.clone());
+            match provider.get_stacks() {
+                Ok(stacks) => app.set_stacks(models::build_stacks_model(&stacks)),
+                Err(e) => eprintln!("failed to reload stacks: {e}"),
+            }
+        })
+    };
+
+    app.on_abandon_commit({
+        let reload = Rc::clone(&reload);
+        let repo_path = repo_path.clone();
+        move |commit_id| {
+            match jujutsu::abandon_commit(&repo_path, &commit_id) {
+                Ok(()) => reload(),
+                Err(e) => eprintln!("failed to abandon {commit_id}: {e}"),
+            }
+        }
+    });
+
+    app.on_refresh({
+        let reload = Rc::clone(&reload);
+        move || reload()
+    });
 
     app.on_add_branch({
         let base_ref = config.base_ref();
