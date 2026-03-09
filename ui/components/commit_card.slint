@@ -4,10 +4,16 @@ export component CommitCard inherits Rectangle {
     in property <StackCommit> commit;
     callback clicked(string);
     callback abandon-requested(string);
+    callback drop-onto(string, string);  // (dragged-id, target-id)
 
     height: 90px;
-    background: root.commit.is-conflicted ? #4a2b2b : #2b3a4a;
+    background: drop-area.contains-drag ? #1e3a4a :
+                root.commit.is-conflicted ? #4a2b2b : #2b3a4a;
     border-radius: 6px;
+    border-width: drop-area.contains-drag ? 2px : 0px;
+    border-color: #4fc3f7;
+
+    animate background { duration: 120ms; easing: ease-in-out; }
 
     popup := PopupWindow {
         x: 0px;
@@ -48,11 +54,27 @@ export component CommitCard inherits Rectangle {
         }
     }
 
-    TouchArea {
-        clicked => { root.clicked(root.commit.commit-id); }
-        pointer-event(event) => {
-            if (event.button == PointerEventButton.right && event.kind == PointerEventKind.up) {
-                popup.show();
+    // Receives drops from other cards being dragged onto this one.
+    drop-area := DropArea {
+        can-drop(event) => {
+            event.mime-type == "text/plain" && event.data != root.commit.commit-id
+        }
+        dropped(event) => {
+            root.drop-onto(event.data, root.commit.commit-id);
+        }
+    }
+
+    // Makes this card draggable; the inner TouchArea handles click / right-click.
+    DragArea {
+        mime-type: "text/plain";
+        data: root.commit.commit-id;
+
+        touch := TouchArea {
+            clicked => { root.clicked(root.commit.commit-id); }
+            pointer-event(event) => {
+                if (event.button == PointerEventButton.right && event.kind == PointerEventKind.up) {
+                    popup.show();
+                }
             }
         }
     }

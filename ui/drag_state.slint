@@ -1,0 +1,8 @@
+export global DragState {
+    in-out property <bool> active: false;
+    in-out property <string> dragged-id: "";
+    // Set by whichever drop target is currently hovered:
+    in-out property <string> drop-target-id: "";   // non-empty = drop onto this commit
+    in-out property <bool> drop-is-between: false; // true = drop into a gap
+    in-out property <string> drop-before-id: "";   // the commit just above the gap ("" = top of stack)
+}

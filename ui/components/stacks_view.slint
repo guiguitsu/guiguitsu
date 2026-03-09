@@ -6,6 +6,8 @@ export component StacksView inherits Rectangle {
     in property <[Stack]> stacks;
     callback commit-selected(string);
     callback abandon-requested(string);
+    callback commit-dropped-onto(string, string);
+    callback commit-dropped-between(string, string);  // (dragged-id, before-id)
     background: #1a1a2e;
 
     ScrollView {
@@ -20,7 +22,7 @@ export component StacksView inherits Rectangle {
 
                 VerticalLayout {
                     padding: 10px;
-                    spacing: 8px;
+                    spacing: 0px;
 
                     Text {
                         text: stack.name;
@@ -29,10 +31,39 @@ export component StacksView inherits Rectangle {
                         font-weight: 700;
                     }
 
-                    for commit in stack.commits: CommitCard {
-                        commit: commit;
-                        clicked(id)           => { root.commit-selected(id); }
-                        abandon-requested(id) => { root.abandon-requested(id); }
+                    // Drop zone above the first commit ("before-id" = "" means top of stack)
+                    top-drop-rect := Rectangle {
+                        height: 8px;
+                        border-radius: 3px;
+                        background: top-slot.contains-drag ? #4fc3f7.transparentize(40%) : transparent;
+                        animate background { duration: 120ms; }
+                        top-slot := DropArea {
+                            can-drop(event) => { event.mime-type == "text/plain" }
+                            dropped(event) => { root.commit-dropped-between(event.data, ""); }
+                        }
+                    }
+
+                    for commit in stack.commits: VerticalLayout {
+                        spacing: 0px;
+
+                        CommitCard {
+                            commit: commit;
+                            clicked(id)           => { root.commit-selected(id); }
+                            abandon-requested(id) => { root.abandon-requested(id); }
+                            drop-onto(dragged, target) => { root.commit-dropped-onto(dragged, target); }
+                        }
+
+                        // Drop zone below this commit (before-id = this commit's id)
+                        slot-rect := Rectangle {
+                            height: 8px;
+                            border-radius: 3px;
+                            background: slot-drop.contains-drag ? #4fc3f7.transparentize(40%) : transparent;
+                            animate background { duration: 120ms; }
+                            slot-drop := DropArea {
+                                can-drop(event) => { event.mime-type == "text/plain" }
+                                dropped(event) => { root.commit-dropped-between(event.data, commit.commit-id); }
+                            }
+                        }
                     }
                 }
             }

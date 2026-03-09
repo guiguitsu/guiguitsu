@@ -239,6 +239,18 @@ fn run_app(repo_path: PathBuf, print_stacks: bool) -> Result<()> {
         }
     });
 
+    app.on_drop_onto_commit(|dragged_id, target_id| {
+        println!("[drag] drop onto: {} -> {}", dragged_id, target_id);
+    });
+
+    app.on_drop_between_commits(|dragged_id, before_id| {
+        if before_id.is_empty() {
+            println!("[drag] drop between: {} -> top of stack", dragged_id);
+        } else {
+            println!("[drag] drop between: {} -> after {}", dragged_id, before_id);
+        }
+    });
+
     app.on_refresh({
         let reload = Rc::clone(&reload);
         move || reload()
