@@ -72,8 +72,14 @@ pub fn abandon_commit(repo_path: &Path, sha: &str) -> Result<()> {
 }
 
 /// Move the working copy to a new empty commit on top of `sha`.
-pub fn new_at(repo_path: &Path, sha: &str) -> Result<()> {
+/// Returns the SHA of the newly created commit.
+pub fn new_at(repo_path: &Path, sha: &str) -> Result<String> {
     run_jj(repo_path, &["new", sha])?;
+    run_jj(repo_path, &["log", "-r", "@", "--no-graph", "-T", "commit_id"])
+}
+
+pub fn create_bookmark(repo_path: &Path, name: &str, revision: &str) -> Result<()> {
+    run_jj(repo_path, &["bookmark", "create", name, "-r", revision])?;
     Ok(())
 }
 
@@ -95,8 +101,8 @@ mod tests {
 
     use anyhow::{Context, Result, anyhow};
 
-    use super::abandon_commit;
-    use crate::git_utils::{find_commit_by_description, parent_shas};
+    use super::{abandon_commit, create_bookmark, new_at};
+    use crate::git_utils::{find_commit_by_description, parent_shas, run_command};
 
     struct TempRepo {
         path: PathBuf,
@@ -151,6 +157,33 @@ mod tests {
         // After abandoning commit 2, commit 3 should be reparented onto commit 1.
         let new_sha3 = find_commit_by_description(&repo.path, "branch1 commit 3")?;
         assert_eq!(parent_shas(&repo.path, &new_sha3)?, vec![sha1]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn new_at_returns_sha_of_new_commit() -> Result<()> {
+        let repo = TempRepo::create()?;
+        let main_sha = run_command("git", &["rev-parse", "main"], Some(&repo.path))?;
+
+        let new_sha = new_at(&repo.path, &main_sha)?;
+
+        assert!(!new_sha.is_empty());
+        assert_eq!(parent_shas(&repo.path, &new_sha)?, vec![main_sha]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn create_bookmark_creates_local_branch() -> Result<()> {
+        let repo = TempRepo::create()?;
+        let main_sha = run_command("git", &["rev-parse", "main"], Some(&repo.path))?;
+
+        let new_sha = new_at(&repo.path, &main_sha)?;
+        create_bookmark(&repo.path, "my-feature", &new_sha)?;
+
+        let branch_sha = run_command("git", &["rev-parse", "my-feature"], Some(&repo.path))?;
+        assert_eq!(branch_sha, new_sha);
 
         Ok(())
     }

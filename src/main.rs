@@ -176,11 +176,13 @@ fn apply_branch(repo_path: PathBuf, branch_name: String) -> Result<()> {
     git_utils::validate_startup_requirements(&repo_path)?;
     let config = Config::load(&repo_path)?;
 
-    if !git_utils::local_branch_exists(&repo_path, &branch_name)? {
-        git_utils::create_branch(&repo_path, &branch_name, &config.trunk)?;
-    }
-
+    // Find the merge commit before any jj new calls that would move HEAD away from it.
     let (merge_sha, mut parents) = git_utils::find_workspace_merge_commit(&repo_path)?;
+
+    if !git_utils::local_branch_exists(&repo_path, &branch_name)? {
+        let sha = jujutsu::new_at(&repo_path, &config.trunk)?;
+        jujutsu::create_bookmark(&repo_path, &branch_name, &sha)?;
+    }
     let branch_head = git_utils::resolve_ref(&repo_path, &branch_name)?;
     parents.push(branch_head);
 
@@ -270,4 +272,67 @@ fn run_app(repo_path: PathBuf, print_stacks: bool) -> Result<()> {
 
     app.run()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use anyhow::{Context, Result, anyhow};
+
+    use super::apply_branch;
+    use crate::stacks::{GitStackProvider, StackProvider};
+
+    struct TempRepo {
+        path: PathBuf,
+    }
+
+    impl TempRepo {
+        fn create() -> Result<Self> {
+            let mut path = std::env::temp_dir();
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .context("time went backwards")?
+                .as_nanos();
+            path.push(format!("guiguitsu-main-test-{now}-{}", std::process::id()));
+
+            let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/repos/repo1.sh");
+            let output = Command::new("bash")
+                .arg(script)
+                .arg(&path)
+                .output()
+                .context("failed to execute repo1.sh")?;
+
+            if !output.status.success() {
+                return Err(anyhow!(
+                    "repo1.sh failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+
+            Ok(Self { path })
+        }
+    }
+
+    impl Drop for TempRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn apply_branch_new_branch_appears_in_stacks() -> Result<()> {
+        let repo = TempRepo::create()?;
+
+        apply_branch(repo.path.clone(), "foo".to_string())?;
+
+        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string());
+        let stacks = provider.get_stacks()?;
+        let names: Vec<&str> = stacks.iter().map(|s| s.name.as_str()).collect();
+
+        assert!(names.contains(&"foo"), "expected 'foo' in stacks, got: {names:?}");
+        Ok(())
+    }
 }
