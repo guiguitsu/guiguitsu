@@ -7,6 +7,13 @@ use crate::git_utils::{CommitInfo, branch_name_for, commits_in_range, current_he
 pub struct StackInfo {
     pub name: String,
     pub commits: Vec<CommitInfo>,
+    pub base_commit_id: String,
+}
+
+impl StackInfo {
+    pub fn head_commit_id(&self) -> Option<&str> {
+        self.commits.first().map(|c| c.commit_id.as_str())
+    }
 }
 
 pub trait StackProvider {
@@ -52,7 +59,7 @@ impl StackProvider for GitStackProvider {
             let name = branch_name_for(&self.repo_path, branch_parent)
                 .unwrap_or_else(|_| branch_parent[..branch_parent.len().min(8)].to_string());
             let commits = commits_in_range(&self.repo_path, &trunk_parent, branch_parent)?;
-            stacks.push(StackInfo { name, commits });
+            stacks.push(StackInfo { name, commits, base_commit_id: trunk_parent.clone() });
         }
 
         Ok(stacks)
@@ -127,5 +134,47 @@ mod tests {
         let names: Vec<&str> = stacks.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, vec!["workspace"]);
         Ok(())
+    }
+
+    #[test]
+    fn base_commit_id_is_tip_of_trunk() -> Result<()> {
+        let repo = TempRepo::create()?;
+        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string());
+
+        let stacks = provider.get_stacks()?;
+        let stack = &stacks[0];
+
+        let main_tip = Command::new("git")
+            .args(["rev-parse", "main"])
+            .current_dir(&repo.path)
+            .output()
+            .context("git rev-parse main")?;
+        let expected = String::from_utf8_lossy(&main_tip.stdout).trim().to_string();
+
+        assert_eq!(stack.base_commit_id, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn head_commit_id_is_first_commit_in_stack() -> Result<()> {
+        let repo = TempRepo::create()?;
+        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string());
+
+        let stacks = provider.get_stacks()?;
+        let stack = &stacks[0];
+
+        let head = stack.head_commit_id().expect("stack should not be empty");
+        assert_eq!(head, stack.commits.first().unwrap().commit_id);
+        Ok(())
+    }
+
+    #[test]
+    fn head_commit_id_returns_none_for_empty_commits() {
+        let stack = super::StackInfo {
+            name: "empty".to_string(),
+            commits: vec![],
+            base_commit_id: "abc123".to_string(),
+        };
+        assert!(stack.head_commit_id().is_none());
     }
 }

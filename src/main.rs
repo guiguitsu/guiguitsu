@@ -202,7 +202,9 @@ fn run_app(repo_path: PathBuf, print_stacks: bool) -> Result<()> {
 
     if print_stacks {
         for stack in &stacks {
-            println!("Stack: {}", stack.name);
+            let head = stack.head_commit_id().unwrap_or("(empty)");
+            let base = &stack.base_commit_id;
+            println!("Stack: {} (head: {}, base: {})", stack.name, &head[..8.min(head.len())], &base[..8.min(base.len())]);
             for commit in &stack.commits {
                 println!("  {} {}", &commit.commit_id[..8.min(commit.commit_id.len())], commit.description);
             }
