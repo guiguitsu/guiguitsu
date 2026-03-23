@@ -31,10 +31,12 @@ pub(crate) fn run_command(command: &str, args: &[&str], current_dir: Option<&Pat
     } else {
         format!(" {}", args.join(" "))
     };
-    if let Some(current_dir) = current_dir {
-        eprintln!("cd {} && {}{}", current_dir.display(), command, rendered_args);
-    } else {
-        eprintln!("{}{}", command, rendered_args);
+    if std::env::var("VERBOSE").as_deref() == Ok("1") {
+        if let Some(current_dir) = current_dir {
+            eprintln!("cd {} && {}{}", current_dir.display(), command, rendered_args);
+        } else {
+            eprintln!("{}{}", command, rendered_args);
+        }
     }
 
     let output = process
@@ -96,6 +98,10 @@ pub fn init_repo(repo_path: &Path, config: &Config) -> Result<()> {
             &[&head, &trunk_sha],
             true,
         )?;
+
+        let mut config = config.clone();
+        config.parents = vec![config.workspace_branch.clone(), config.trunk.clone()];
+        config.save(repo_path)?;
     }
 
     Ok(())
@@ -188,6 +194,14 @@ pub fn is_ancestor(repo_path: &Path, sha: &str, of_ref: &str) -> Result<bool> {
 
 pub fn resolve_ref(repo_path: &Path, git_ref: &str) -> Result<String> {
     run_git(repo_path, &["rev-parse", git_ref])
+}
+
+pub fn commit_subject(repo_path: &Path, sha: &str) -> Result<String> {
+    run_git(repo_path, &["log", "-1", "--format=%s", sha])
+}
+
+pub fn merge_base(repo_path: &Path, a: &str, b: &str) -> Result<String> {
+    run_git(repo_path, &["merge-base", a, b])
 }
 
 pub fn create_branch(repo_path: &Path, branch: &str, start_point: &str) -> Result<()> {
@@ -513,6 +527,7 @@ mod tests {
             workspace_branch: "guiguitsu/test".to_string(),
             workspace_remote: "origin".to_string(),
             trunk: "main".to_string(),
+            parents: vec![],
         };
         let error = init_repo(&repo.path, &config).expect_err("expected staged-change bailout");
 

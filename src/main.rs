@@ -12,6 +12,10 @@ use config::Config;
 
 slint::include_modules!();
 
+fn verbose() -> bool {
+    std::env::var("VERBOSE").as_deref() == Ok("1")
+}
+
 fn main() -> Result<()> {
     match parse_command(std::env::args().skip(1).collect())? {
         CliCommand::Help => {
@@ -20,11 +24,14 @@ fn main() -> Result<()> {
         }
         CliCommand::Init { repo_path, config } => {
             git_utils::init_repo(&repo_path, &config)?;
-            println!("Wrote {}", Config::path(&repo_path).display());
+            if verbose() {
+                println!("Wrote {}", Config::path(&repo_path).display());
+            }
             Ok(())
         }
         CliCommand::Run { repo_path, print_stacks } => run_app(repo_path, print_stacks),
         CliCommand::ApplyBranch { repo_path, branch_name } => apply_branch(repo_path, branch_name),
+        CliCommand::RereadStacks { repo_path } => reread_stacks(repo_path),
     }
 }
 
@@ -39,6 +46,7 @@ Options:
   --apply-branch <branch>          Add <branch> as a parent of the workspace merge commit,
                                    creating it off trunk if it does not exist
   --print-stacks                   Print stacks to stdout and exit (no GUI)
+  --reread-stacks                  Re-read merge commit parents from git and update config
   --help                           Show this help message
 
 Init options:
@@ -62,6 +70,9 @@ enum CliCommand {
     ApplyBranch {
         repo_path: PathBuf,
         branch_name: String,
+    },
+    RereadStacks {
+        repo_path: PathBuf,
     },
 }
 
@@ -128,6 +139,7 @@ fn parse_init_command(args: &[String]) -> Result<CliCommand> {
             workspace_remote: workspace_remote
                 .ok_or_else(|| anyhow::anyhow!("missing required argument: --workspace-remote=<remote>"))?,
             trunk: trunk.ok_or_else(|| anyhow::anyhow!("missing required argument: --trunk=<main>"))?,
+            parents: vec![],
         },
     })
 }
@@ -135,6 +147,7 @@ fn parse_init_command(args: &[String]) -> Result<CliCommand> {
 fn parse_run_command(args: &[String]) -> Result<CliCommand> {
     let mut repo_arg: Option<PathBuf> = None;
     let mut print_stacks = false;
+    let mut reread_stacks = false;
     let mut apply_branch: Option<String> = None;
 
     let mut i = 0;
@@ -142,6 +155,8 @@ fn parse_run_command(args: &[String]) -> Result<CliCommand> {
         let arg = &args[i];
         if arg == "--print-stacks" {
             print_stacks = true;
+        } else if arg == "--reread-stacks" {
+            reread_stacks = true;
         } else if let Some(val) = arg.strip_prefix("--apply-branch=") {
             if val.is_empty() {
                 bail!("--apply-branch cannot be empty");
@@ -169,12 +184,16 @@ fn parse_run_command(args: &[String]) -> Result<CliCommand> {
         return Ok(CliCommand::ApplyBranch { repo_path, branch_name });
     }
 
+    if reread_stacks {
+        return Ok(CliCommand::RereadStacks { repo_path });
+    }
+
     Ok(CliCommand::Run { repo_path, print_stacks })
 }
 
 fn apply_branch(repo_path: PathBuf, branch_name: String) -> Result<()> {
     git_utils::validate_startup_requirements(&repo_path)?;
-    let config = Config::load(&repo_path)?;
+    let mut config = Config::load(&repo_path)?;
 
     // Find the merge commit before any jj new calls that would move HEAD away from it.
     let (merge_sha, mut parents) = git_utils::find_workspace_merge_commit(&repo_path)?;
@@ -189,6 +208,41 @@ fn apply_branch(repo_path: PathBuf, branch_name: String) -> Result<()> {
     let new_merge_sha = jujutsu::rebase_merge_commit(&repo_path, &merge_sha, &parents)?;
     // After rebase the working copy may have moved; park it back on top of the merge commit.
     jujutsu::new_at(&repo_path, &new_merge_sha)?;
+
+    config.parents.push(branch_name);
+    config.save(&repo_path)?;
+    Ok(())
+}
+
+fn reread_stacks(repo_path: PathBuf) -> Result<()> {
+    git_utils::validate_startup_requirements(&repo_path)?;
+    let mut config = Config::load(&repo_path)?;
+    let old_parents = config.parents.clone();
+    let (_merge_sha, git_parents) = git_utils::find_workspace_merge_commit(&repo_path)?;
+
+    let mut parents = Vec::with_capacity(git_parents.len());
+    for (i, sha) in git_parents.iter().enumerate() {
+        let name = match i {
+            0 => config.workspace_branch.clone(),
+            1 => config.trunk.clone(),
+            _ => git_utils::branch_name_for(&repo_path, sha)?,
+        };
+        parents.push(name);
+    }
+
+    config.parents = parents;
+    config.save(&repo_path)?;
+
+    if config.parents != old_parents {
+        jujutsu::absorb(&repo_path, &[config::FILE_NAME])?;
+    }
+
+    if verbose() {
+        println!("Updated parents:");
+        for (i, name) in config.parents.iter().enumerate() {
+            println!("  [{}] {}", i, name);
+        }
+    }
     Ok(())
 }
 
@@ -197,14 +251,20 @@ fn run_app(repo_path: PathBuf, print_stacks: bool) -> Result<()> {
 
     git_utils::validate_startup_requirements(&repo_path)?;
     let config = Config::load(&repo_path)?;
-    let provider = GitStackProvider::new(repo_path.clone(), config.trunk.clone());
+    let provider = GitStackProvider::new(repo_path.clone(), config.parents.clone());
     let stacks = provider.get_stacks()?;
 
     if print_stacks {
+        let (_merge_sha, merge_parents) = git_utils::find_workspace_merge_commit(&repo_path)?;
+        let trunk_head = &merge_parents[1];
+        let trunk_subject = git_utils::commit_subject(&repo_path, trunk_head)?;
+        println!("Stack: {} (head: {} - {})", config.trunk, &trunk_head[..8.min(trunk_head.len())], trunk_subject);
         for stack in &stacks {
             let head = stack.head_commit_id().unwrap_or("(empty)");
+            let head_subject = git_utils::commit_subject(&repo_path, head).unwrap_or_default();
             let base = &stack.base_commit_id;
-            println!("Stack: {} (head: {}, base: {})", stack.name, &head[..8.min(head.len())], &base[..8.min(base.len())]);
+            let base_subject = git_utils::commit_subject(&repo_path, base).unwrap_or_default();
+            println!("Stack: {} (head: {} - {}, base: {} - {})", stack.name, &head[..8.min(head.len())], head_subject, &base[..8.min(base.len())], base_subject);
             for commit in &stack.commits {
                 println!("  {} {}", &commit.commit_id[..8.min(commit.commit_id.len())], commit.description);
             }
@@ -219,10 +279,10 @@ fn run_app(repo_path: PathBuf, print_stacks: bool) -> Result<()> {
     let reload: Rc<dyn Fn()> = {
         let app_weak = app.as_weak();
         let repo_path = repo_path.clone();
-        let trunk = config.trunk.clone();
+        let parents = config.parents.clone();
         Rc::new(move || {
             let app = match app_weak.upgrade() { Some(a) => a, None => return };
-            let provider = GitStackProvider::new(repo_path.clone(), trunk.clone());
+            let provider = GitStackProvider::new(repo_path.clone(), parents.clone());
             match provider.get_stacks() {
                 Ok(stacks) => app.set_stacks(models::build_stacks_model(&stacks)),
                 Err(e) => eprintln!("failed to reload stacks: {e}"),
@@ -342,11 +402,28 @@ mod tests {
 
         apply_branch(repo.path.clone(), "foo".to_string())?;
 
-        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string());
+        let config = crate::config::Config::load(&repo.path)?;
+        let provider = GitStackProvider::new(repo.path.clone(), config.parents.clone());
         let stacks = provider.get_stacks()?;
         let names: Vec<&str> = stacks.iter().map(|s| s.name.as_str()).collect();
 
         assert!(names.contains(&"foo"), "expected 'foo' in stacks, got: {names:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn apply_branch_updates_config_parents() -> Result<()> {
+        let repo = TempRepo::create()?;
+
+        apply_branch(repo.path.clone(), "bar".to_string())?;
+
+        let config = crate::config::Config::load(&repo.path)?;
+        assert_eq!(
+            config.parents.last().map(String::as_str),
+            Some("bar"),
+            "expected 'bar' as last parent in config, got: {:?}",
+            config.parents
+        );
         Ok(())
     }
 }

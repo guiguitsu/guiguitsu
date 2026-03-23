@@ -13,6 +13,8 @@ pub struct Config {
     pub workspace_branch: String,
     pub workspace_remote: String,
     pub trunk: String,
+    #[serde(default)]
+    pub parents: Vec<String>,
 }
 
 impl Config {

@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
-use crate::git_utils::{CommitInfo, branch_name_for, commits_in_range, current_head_sha, is_ancestor, parent_shas};
+use crate::git_utils::{CommitInfo, branch_name_for, commits_in_range, current_head_sha, is_ancestor, merge_base, parent_shas};
+use anyhow::bail;
 
 pub struct StackInfo {
     pub name: String,
@@ -22,12 +23,12 @@ pub trait StackProvider {
 
 pub struct GitStackProvider {
     repo_path: PathBuf,
-    trunk: String,
+    parents: Vec<String>,
 }
 
 impl GitStackProvider {
-    pub fn new(repo_path: PathBuf, trunk: String) -> Self {
-        Self { repo_path, trunk }
+    pub fn new(repo_path: PathBuf, parents: Vec<String>) -> Self {
+        Self { repo_path, parents }
     }
 }
 
@@ -36,7 +37,7 @@ impl StackProvider for GitStackProvider {
         let head_sha = current_head_sha(&self.repo_path)?;
 
         let mut sha = head_sha;
-        let parents = loop {
+        let git_parents = loop {
             let parents = parent_shas(&self.repo_path, &sha)?;
             if parents.len() >= 2 {
                 break parents;
@@ -47,9 +48,55 @@ impl StackProvider for GitStackProvider {
             }
         };
 
+        if self.parents.is_empty() {
+            return self.get_stacks_legacy(&git_parents);
+        }
+
+        if git_parents.len() != self.parents.len() {
+            bail!(
+                "config parents count ({}) does not match git merge parents count ({})",
+                self.parents.len(),
+                git_parents.len()
+            );
+        }
+
+        // parent[1] is trunk per init_repo convention
+        let trunk_parent = &git_parents[1];
+        let mut stacks = Vec::new();
+
+        for (i, parent_sha) in git_parents.iter().enumerate().skip(2) {
+            let name = self.parents[i].clone();
+            let base = merge_base(&self.repo_path, trunk_parent, parent_sha)?;
+            let commits = commits_in_range(&self.repo_path, trunk_parent, parent_sha)?;
+            stacks.push(StackInfo {
+                name,
+                commits,
+                base_commit_id: base,
+            });
+        }
+
+        // parent[0] is the workspace branch (config commit on top of trunk)
+        // Include it as a stack if it has commits beyond trunk
+        let workspace_commits = commits_in_range(&self.repo_path, trunk_parent, &git_parents[0])?;
+        if !workspace_commits.is_empty() {
+            let base = merge_base(&self.repo_path, trunk_parent, &git_parents[0])?;
+            stacks.insert(0, StackInfo {
+                name: self.parents[0].clone(),
+                commits: workspace_commits,
+                base_commit_id: base,
+            });
+        }
+
+        Ok(stacks)
+    }
+}
+
+impl GitStackProvider {
+    /// Fallback for configs without `parents` field (backwards compatibility).
+    fn get_stacks_legacy(&self, parents: &[String]) -> Result<Vec<StackInfo>> {
         let trunk_parent = parents
             .iter()
-            .find(|p| is_ancestor(&self.repo_path, p, &self.trunk).unwrap_or(false))
+            .find(|p| is_ancestor(&self.repo_path, p, "main").unwrap_or(false))
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("no trunk parent found among merge commit parents"))?;
 
@@ -116,7 +163,7 @@ mod tests {
     #[test]
     fn get_stacks_returns_two_stacks_from_repo1() -> Result<()> {
         let repo = TempRepo::create()?;
-        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string());
+        let provider = GitStackProvider::new(repo.path.clone(), vec!["workspace".to_string(), "main".to_string()]);
 
         let stacks = provider.get_stacks()?;
 
@@ -127,7 +174,7 @@ mod tests {
     #[test]
     fn get_stacks_returns_correct_stack_names_from_repo1() -> Result<()> {
         let repo = TempRepo::create()?;
-        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string());
+        let provider = GitStackProvider::new(repo.path.clone(), vec!["workspace".to_string(), "main".to_string()]);
 
         let stacks = provider.get_stacks()?;
 
@@ -137,19 +184,19 @@ mod tests {
     }
 
     #[test]
-    fn base_commit_id_is_tip_of_trunk() -> Result<()> {
+    fn base_commit_id_is_fork_point() -> Result<()> {
         let repo = TempRepo::create()?;
-        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string());
+        let provider = GitStackProvider::new(repo.path.clone(), vec!["workspace".to_string(), "main".to_string()]);
 
         let stacks = provider.get_stacks()?;
         let stack = &stacks[0];
 
-        let main_tip = Command::new("git")
-            .args(["rev-parse", "main"])
+        let mb = Command::new("git")
+            .args(["merge-base", "main", "workspace"])
             .current_dir(&repo.path)
             .output()
-            .context("git rev-parse main")?;
-        let expected = String::from_utf8_lossy(&main_tip.stdout).trim().to_string();
+            .context("git merge-base")?;
+        let expected = String::from_utf8_lossy(&mb.stdout).trim().to_string();
 
         assert_eq!(stack.base_commit_id, expected);
         Ok(())
@@ -158,7 +205,7 @@ mod tests {
     #[test]
     fn head_commit_id_is_first_commit_in_stack() -> Result<()> {
         let repo = TempRepo::create()?;
-        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string());
+        let provider = GitStackProvider::new(repo.path.clone(), vec!["workspace".to_string(), "main".to_string()]);
 
         let stacks = provider.get_stacks()?;
         let stack = &stacks[0];
@@ -176,5 +223,37 @@ mod tests {
             base_commit_id: "abc123".to_string(),
         };
         assert!(stack.head_commit_id().is_none());
+    }
+
+    #[test]
+    fn get_stacks_errors_on_parent_count_mismatch() -> Result<()> {
+        let repo = TempRepo::create()?;
+        // The repo has 2 merge parents but we pass 3 config parents — should error.
+        let provider = GitStackProvider::new(
+            repo.path.clone(),
+            vec!["workspace".to_string(), "main".to_string(), "extra".to_string()],
+        );
+
+        match provider.get_stacks() {
+            Err(err) => assert!(
+                err.to_string().contains("does not match"),
+                "unexpected error: {err}"
+            ),
+            Ok(_) => panic!("expected parent count mismatch error"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn get_stacks_legacy_fallback_when_parents_empty() -> Result<()> {
+        let repo = TempRepo::create()?;
+        // Empty parents should fall back to legacy is_ancestor logic.
+        let provider = GitStackProvider::new(repo.path.clone(), vec![]);
+
+        let stacks = provider.get_stacks()?;
+
+        assert_eq!(stacks.len(), 1);
+        assert_eq!(stacks[0].name, "workspace");
+        Ok(())
     }
 }

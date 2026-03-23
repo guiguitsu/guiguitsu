@@ -93,6 +93,13 @@ pub fn create_merge_commit(repo_path: &Path, message: &str, shas: &[&str], do_ne
     Ok(())
 }
 
+pub fn absorb(repo_path: &Path, paths: &[&str]) -> Result<()> {
+    let mut args = vec!["absorb"];
+    args.extend_from_slice(paths);
+    run_jj(repo_path, &args)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
