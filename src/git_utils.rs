@@ -84,21 +84,35 @@ pub fn init_repo(repo_path: &Path, config: &Config) -> Result<()> {
     config.save(repo_path)?;
 
     if has_file_changes(repo_path, FILE_NAME)? {
+        // Check for an existing merge BEFORE modifying the workspace branch,
+        // since the check relies on workspace pointing at its original tip.
+        let has_existing_merge = local_branch_exists(repo_path, &config.workspace_branch)?
+            && find_existing_workspace_merge(
+                repo_path,
+                &config.workspace_branch,
+                &config.trunk,
+            )?
+            .is_some();
+
         if local_branch_exists(repo_path, &config.workspace_branch)? {
-            run_git(repo_path, &["checkout", &config.workspace_branch])?;
+            crate::jujutsu::describe_current(repo_path, "Add guiguitsu configuration")?;
+            crate::jujutsu::rebase_after(repo_path, "@", &config.workspace_branch)?;
+            crate::jujutsu::set_bookmark(repo_path, &config.workspace_branch, "@")?;
         } else {
             run_git(repo_path, &["checkout", "-b", &config.workspace_branch, &config.trunk])?;
+            run_git(repo_path, &["add", FILE_NAME])?;
+            run_git(repo_path, &["commit", "-m", "Add guiguitsu configuration"])?;
         }
-        run_git(repo_path, &["add", FILE_NAME])?;
-        run_git(repo_path, &["commit", "-m", "Add guiguitsu configuration"])?;
-        let head = current_head_sha(repo_path)?;
-        let trunk_sha = run_git(repo_path, &["rev-parse", &config.trunk])?;
-        crate::jujutsu::create_merge_commit(
-            repo_path,
-            "Special workspace merge commit",
-            &[&head, &trunk_sha],
-            true,
-        )?;
+        if !has_existing_merge {
+            let head = current_head_sha(repo_path)?;
+            let trunk_sha = run_git(repo_path, &["rev-parse", &config.trunk])?;
+            crate::jujutsu::create_merge_commit(
+                repo_path,
+                "Special workspace merge commit",
+                &[&head, &trunk_sha],
+                true,
+            )?;
+        }
 
         let mut config = config.clone();
         config.parents = vec![config.workspace_branch.clone(), config.trunk.clone()];
@@ -232,6 +246,102 @@ pub fn parent_shas(repo_path: &Path, commit_sha: &str) -> Result<Vec<String>> {
         .ok_or_else(|| anyhow!("empty output for commit {commit_sha}"))?;
 
     Ok(parts.map(ToString::to_string).collect())
+}
+
+/// Returns true if the commit has more than one parent.
+pub fn is_merge_commit(repo_path: &Path, commit_sha: &str) -> Result<bool> {
+    let parents = parent_shas(repo_path, commit_sha)?;
+    Ok(parents.len() >= 2)
+}
+
+/// Returns the SHAs of all commits that have `commit_sha` as a parent,
+/// within the given range of refs (e.g. `"--all"` or `"branch_a..branch_b"`).
+/// If `range` is empty, searches all refs.
+pub fn children_of(repo_path: &Path, commit_sha: &str, range: &[&str]) -> Result<Vec<String>> {
+    let mut args = vec!["rev-list", "--parents"];
+    if range.is_empty() {
+        args.push("--all");
+    } else {
+        args.extend_from_slice(range);
+    }
+    let output = run_git(repo_path, &args)?;
+
+    let mut children = Vec::new();
+    for line in output.lines() {
+        let mut parts = line.split_whitespace();
+        let child_sha = match parts.next() {
+            Some(s) => s,
+            None => continue,
+        };
+        // Remaining tokens are the parent SHAs of this child
+        if parts.any(|p| p == commit_sha) {
+            children.push(child_sha.to_string());
+        }
+    }
+    Ok(children)
+}
+
+/// Walks forward from `commit_sha` through its children until a merge commit
+/// is found. Bails if any commit along the path has more than one child
+/// (ambiguous path). Returns the SHA of the first merge commit encountered.
+pub fn child_merge_commit(repo_path: &Path, commit_sha: &str) -> Result<String> {
+    let mut current = commit_sha.to_string();
+    loop {
+        let kids = children_of(repo_path, &current, &[])?;
+        match kids.len() {
+            0 => bail!("reached tip without finding a merge commit (at {current})"),
+            1 => {
+                let child = &kids[0];
+                if is_merge_commit(repo_path, child)? {
+                    return Ok(child.clone());
+                }
+                current = child.clone();
+            }
+            _ => bail!(
+                "commit {current} has {} children; path is ambiguous",
+                kids.len()
+            ),
+        }
+    }
+}
+
+/// Checks whether a valid workspace merge commit already exists.
+///
+/// Walks forward from the workspace branch through `child_merge_commit` and
+/// validates that the found merge's parents include both the workspace branch
+/// SHA and an ancestor of trunk.
+///
+/// Returns `Ok(Some(merge_sha))` if a valid merge exists, `Ok(None)` otherwise.
+pub fn find_existing_workspace_merge(
+    repo_path: &Path,
+    workspace_branch: &str,
+    trunk: &str,
+) -> Result<Option<String>> {
+    let workspace_sha = resolve_ref(repo_path, workspace_branch)?;
+
+    let merge_sha = match child_merge_commit(repo_path, &workspace_sha) {
+        Ok(sha) => sha,
+        Err(_) => return Ok(None),
+    };
+
+    let parents = parent_shas(repo_path, &merge_sha)?;
+
+    // One parent must be the workspace branch SHA
+    if !parents.contains(&workspace_sha) {
+        return Ok(None);
+    }
+
+    // Another parent must be an ancestor of trunk (or equal to it)
+    let trunk_sha = resolve_ref(repo_path, trunk)?;
+    let has_trunk_ancestor = parents.iter().any(|p| {
+        p != &workspace_sha && is_ancestor(repo_path, p, &trunk_sha).unwrap_or(false)
+    });
+
+    if has_trunk_ancestor {
+        Ok(Some(merge_sha))
+    } else {
+        Ok(None)
+    }
 }
 
 pub fn branch_name_for(repo_path: &Path, sha: &str) -> Result<String> {
@@ -392,7 +502,7 @@ mod tests {
     use anyhow::{Context, Result, anyhow};
 
     use crate::config::Config;
-    use super::{commits_in_range, create_branch, current_head_sha, find_commit_by_description, has_staged_changed, init_repo, parent_shas, run_command, run_git, validate_startup_requirements};
+    use super::{child_merge_commit, children_of, commits_in_range, create_branch, current_head_sha, find_commit_by_description, find_existing_workspace_merge, has_staged_changed, init_repo, is_merge_commit, parent_shas, run_command, run_git, validate_startup_requirements};
 
     struct TempRepo {
         path: PathBuf,
@@ -627,6 +737,100 @@ mod tests {
     }
 
     #[test]
+    fn is_merge_commit_returns_true_for_merge() -> Result<()> {
+        let repo = TempRepo::create()?;
+        let head = current_head_sha(&repo.path)?;
+        // repo1.sh ends on a workspace merge commit
+        assert!(is_merge_commit(&repo.path, &head)?, "HEAD should be a merge commit");
+        Ok(())
+    }
+
+    #[test]
+    fn is_merge_commit_returns_false_for_regular_commit() -> Result<()> {
+        let repo = TempRepo::create()?;
+        // First parent of the merge is a regular commit
+        let parents = parent_shas(&repo.path, &current_head_sha(&repo.path)?)?;
+        let first_parent = &parents[0];
+        assert!(!is_merge_commit(&repo.path, first_parent)?, "first parent should not be a merge commit");
+        Ok(())
+    }
+
+    #[test]
+    fn children_of_returns_correct_children() -> Result<()> {
+        let repo = TempRepo::create_from("test_gitutils.sh")?;
+
+        // Find the root commit (tagged "root" by the script)
+        let root_sha = run_git(&repo.path, &["rev-parse", "root"])?;
+
+        // The root commit should have children on both main and feature branches
+        let children = children_of(&repo.path, &root_sha, &[])?;
+        assert!(children.len() >= 2, "root commit should have at least 2 children, got {}", children.len());
+        Ok(())
+    }
+
+    #[test]
+    fn children_of_merge_commit_has_no_children_at_tip() -> Result<()> {
+        let repo = TempRepo::create_from("test_gitutils.sh")?;
+
+        // The merge commit is at the tip of main, so it has no children
+        let merge_sha = run_git(&repo.path, &["rev-parse", "merge-commit"])?;
+        let children = children_of(&repo.path, &merge_sha, &[])?;
+        assert!(children.is_empty(), "merge commit at tip should have no children");
+        Ok(())
+    }
+
+    #[test]
+    fn is_merge_commit_on_test_gitutils_repo() -> Result<()> {
+        let repo = TempRepo::create_from("test_gitutils.sh")?;
+
+        let merge_sha = run_git(&repo.path, &["rev-parse", "merge-commit"])?;
+        assert!(is_merge_commit(&repo.path, &merge_sha)?, "tagged merge-commit should be a merge");
+
+        let regular_sha = run_git(&repo.path, &["rev-parse", "root"])?;
+        assert!(!is_merge_commit(&repo.path, &regular_sha)?, "root commit should not be a merge");
+        Ok(())
+    }
+
+    #[test]
+    fn child_merge_commit_finds_merge_via_linear_path() -> Result<()> {
+        let repo = TempRepo::create_from("test_gitutils.sh")?;
+
+        // main3 -> merge-commit is a single-child linear path ending at a merge
+        let main3_sha = run_git(&repo.path, &["rev-parse", "main3"])?;
+        let expected_merge = run_git(&repo.path, &["rev-parse", "merge-commit"])?;
+
+        let found = child_merge_commit(&repo.path, &main3_sha)?;
+        assert_eq!(found, expected_merge);
+        Ok(())
+    }
+
+    #[test]
+    fn child_merge_commit_bails_on_ambiguous_children() -> Result<()> {
+        let repo = TempRepo::create_from("test_gitutils.sh")?;
+
+        // root has 3 children (main2, feature1, feature2-1) — ambiguous
+        let root_sha = run_git(&repo.path, &["rev-parse", "root"])?;
+
+        let err = child_merge_commit(&repo.path, &root_sha)
+            .expect_err("should bail on ambiguous children");
+        assert!(err.to_string().contains("ambiguous"), "error: {err}");
+        Ok(())
+    }
+
+    #[test]
+    fn child_merge_commit_bails_at_tip_with_no_merge() -> Result<()> {
+        let repo = TempRepo::create_from("test_gitutils.sh")?;
+
+        // feature2 commit 1 is a tip with no children
+        let tip_sha = run_git(&repo.path, &["rev-parse", "feature2"])?;
+
+        let err = child_merge_commit(&repo.path, &tip_sha)
+            .expect_err("should bail at tip");
+        assert!(err.to_string().contains("reached tip"), "error: {err}");
+        Ok(())
+    }
+
+    #[test]
     fn init_repo_with_existing_branch_commits_config_to_that_branch() -> Result<()> {
         let repo = TempRepo::create_from("repo_init.sh")?;
 
@@ -653,6 +857,67 @@ mod tests {
             "workspace branch should have the config commit");
 
         // Config should have correct parents
+        let saved_config = Config::load(&repo.path)?;
+        assert_eq!(saved_config.parents, vec!["workspace", "main"]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn find_existing_workspace_merge_returns_some_when_merge_exists() -> Result<()> {
+        let repo = TempRepo::create_from("repo_init_with_merge.sh")?;
+
+        let result = find_existing_workspace_merge(&repo.path, "workspace", "main")?;
+        assert!(result.is_some(), "should find existing workspace merge commit");
+
+        // The returned SHA should be a merge commit
+        let merge_sha = result.unwrap();
+        assert!(is_merge_commit(&repo.path, &merge_sha)?, "returned commit should be a merge");
+
+        Ok(())
+    }
+
+    #[test]
+    fn find_existing_workspace_merge_returns_none_without_merge() -> Result<()> {
+        let repo = TempRepo::create_from("repo_init.sh")?;
+
+        let result = find_existing_workspace_merge(&repo.path, "workspace", "main")?;
+        assert!(result.is_none(), "should not find merge when none exists");
+
+        Ok(())
+    }
+
+    #[test]
+    fn init_repo_skips_merge_when_one_already_exists() -> Result<()> {
+        let repo = TempRepo::create_from("repo_init_with_merge.sh")?;
+
+        // Count merge commits before init (1: the pre-existing merge)
+        let before_merges: usize = run_git(
+            &repo.path,
+            &["rev-list", "--all", "--min-parents=2", "--count"],
+        )?.trim().parse().unwrap();
+        assert_eq!(before_merges, 1, "precondition: exactly 1 merge commit before init");
+
+        let config = Config {
+            workspace_branch: "workspace".to_string(),
+            workspace_remote: "origin".to_string(),
+            trunk: "main".to_string(),
+            parents: vec![],
+        };
+        init_repo(&repo.path, &config)?;
+
+        // jj's rebase reparents the existing merge (creating a copy in git),
+        // so the total merge count goes to 2 (old + reparented).
+        // Without the skip, init would create an *additional* merge (total 3).
+        let after_merges: usize = run_git(
+            &repo.path,
+            &["rev-list", "--all", "--min-parents=2", "--count"],
+        )?.trim().parse().unwrap();
+        assert_eq!(after_merges, 2,
+            "expected 2 merge commits (original + jj reparented), got {after_merges}; \
+             3 would mean a duplicate merge was created");
+
+        // Config should still be saved correctly
         let saved_config = Config::load(&repo.path)?;
         assert_eq!(saved_config.parents, vec!["workspace", "main"]);
 

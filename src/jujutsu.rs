@@ -83,6 +83,11 @@ pub fn create_bookmark(repo_path: &Path, name: &str, revision: &str) -> Result<(
     Ok(())
 }
 
+pub fn set_bookmark(repo_path: &Path, name: &str, revision: &str) -> Result<()> {
+    run_jj(repo_path, &["bookmark", "set", name, "-r", revision])?;
+    Ok(())
+}
+
 pub fn create_merge_commit(repo_path: &Path, message: &str, shas: &[&str], do_new: bool) -> Result<()> {
     let mut args = vec!["new", "-m", message];
     args.extend_from_slice(shas);
@@ -90,6 +95,16 @@ pub fn create_merge_commit(repo_path: &Path, message: &str, shas: &[&str], do_ne
     if do_new {
         run_jj(repo_path, &["new"])?;
     }
+    Ok(())
+}
+
+pub fn describe_current(repo_path: &Path, message: &str) -> Result<()> {
+    run_jj(repo_path, &["desc", "-m", message])?;
+    Ok(())
+}
+
+pub fn rebase_after(repo_path: &Path, revision: &str, target: &str) -> Result<()> {
+    run_jj(repo_path, &["rebase", "-r", revision, "-A", target])?;
     Ok(())
 }
 
