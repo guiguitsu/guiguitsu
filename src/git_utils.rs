@@ -85,9 +85,10 @@ pub fn init_repo(repo_path: &Path, config: &Config) -> Result<()> {
 
     if has_file_changes(repo_path, FILE_NAME)? {
         if local_branch_exists(repo_path, &config.workspace_branch)? {
-            bail!("workspace branch '{}' already exists", config.workspace_branch);
+            run_git(repo_path, &["checkout", &config.workspace_branch])?;
+        } else {
+            run_git(repo_path, &["checkout", "-b", &config.workspace_branch, &config.trunk])?;
         }
-        run_git(repo_path, &["checkout", "-b", &config.workspace_branch, &config.trunk])?;
         run_git(repo_path, &["add", FILE_NAME])?;
         run_git(repo_path, &["commit", "-m", "Add guiguitsu configuration"])?;
         let head = current_head_sha(repo_path)?;
@@ -399,6 +400,10 @@ mod tests {
 
     impl TempRepo {
         fn create() -> Result<Self> {
+            Self::create_from("repo1.sh")
+        }
+
+        fn create_from(script_name: &str) -> Result<Self> {
             let mut path = std::env::temp_dir();
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -406,16 +411,19 @@ mod tests {
                 .as_nanos();
             path.push(format!("guiguitsu-test-repo-{now}-{}", std::process::id()));
 
-            let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/repos/repo1.sh");
+            let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/repos")
+                .join(script_name);
             let output = Command::new("bash")
-                .arg(script)
+                .arg(&script)
                 .arg(&path)
                 .output()
-                .context("failed to execute repo1.sh")?;
+                .with_context(|| format!("failed to execute {script_name}"))?;
 
             if !output.status.success() {
                 return Err(anyhow!(
-                    "repo1.sh failed: {}",
+                    "{} failed: {}",
+                    script_name,
                     String::from_utf8_lossy(&output.stderr).trim()
                 ));
             }
@@ -615,6 +623,39 @@ mod tests {
         let v1_sha = run_git(&repo.path, &["rev-parse", "v1"])?;
         let main_sha = run_git(&repo.path, &["rev-parse", "main"])?;
         assert_eq!(v1_sha, main_sha, "v1 should point at the same commit as main");
+        Ok(())
+    }
+
+    #[test]
+    fn init_repo_with_existing_branch_commits_config_to_that_branch() -> Result<()> {
+        let repo = TempRepo::create_from("repo_init.sh")?;
+
+        let config = Config {
+            workspace_branch: "workspace".to_string(),
+            workspace_remote: "origin".to_string(),
+            trunk: "main".to_string(),
+            parents: vec![],
+        };
+        init_repo(&repo.path, &config)?;
+
+        // .guiguitsu.json should exist
+        assert!(repo.path.join(crate::config::FILE_NAME).is_file(),
+            ".guiguitsu.json should exist after init");
+
+        // HEAD should be on a merge commit with 2 parents
+        let head = current_head_sha(&repo.path)?;
+        let parents = parent_shas(&repo.path, &head)?;
+        assert_eq!(parents.len(), 2, "HEAD should be a merge commit with 2 parents");
+
+        // The workspace branch should have the config commit
+        let workspace_log = run_git(&repo.path, &["log", "--format=%s", "workspace"])?;
+        assert!(workspace_log.contains("Add guiguitsu configuration"),
+            "workspace branch should have the config commit");
+
+        // Config should have correct parents
+        let saved_config = Config::load(&repo.path)?;
+        assert_eq!(saved_config.parents, vec!["workspace", "main"]);
+
         Ok(())
     }
 }
