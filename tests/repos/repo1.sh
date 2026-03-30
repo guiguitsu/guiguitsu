@@ -90,5 +90,40 @@ git commit -m "branch2 commit 2"
 
 git checkout main
 
-cd "${SCRIPT_DIR}/../.."
-cargo run -- -C "$repo_path" init --workspace-branch=workspace --workspace-remote=origin --trunk=main
+# Initialize jj colocated repo
+jj git init --colocate
+
+# Create workspace branch off main and add guiguitsu config
+jj new main
+cat <<'CONF' > .guiguitsu.json
+{
+  "workspace_branch": "workspace",
+  "workspace_remote": "origin",
+  "trunk": "main",
+  "parents": []
+}
+CONF
+jj desc -m "Add guiguitsu configuration"
+jj bookmark create workspace -r @
+
+# Create the workspace merge commit (workspace + main)
+workspace_sha="$(git rev-parse workspace)"
+main_sha="$(git rev-parse main)"
+jj new -m "Special workspace merge commit" "$workspace_sha" "$main_sha"
+
+# Update config with parents
+cat <<'CONF' > .guiguitsu.json
+{
+  "workspace_branch": "workspace",
+  "workspace_remote": "origin",
+  "trunk": "main",
+  "parents": [
+    "workspace",
+    "main"
+  ]
+}
+CONF
+jj desc -m "Special workspace merge commit"
+
+# Move working copy past the merge commit
+jj new

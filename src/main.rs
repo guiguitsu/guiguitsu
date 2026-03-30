@@ -22,12 +22,8 @@ fn main() -> Result<()> {
             print_help();
             Ok(())
         }
-        CliCommand::Init { repo_path, config } => {
-            git_utils::init_repo(&repo_path, &config)?;
-            if verbose() {
-                println!("Wrote {}", Config::path(&repo_path).display());
-            }
-            Ok(())
+        CliCommand::CreateConfig { repo_path, config, after_sha, merge_commit } => {
+            create_config(repo_path, config, after_sha, merge_commit)
         }
         CliCommand::Run { repo_path, print_stacks } => run_app(repo_path, print_stacks),
         CliCommand::ApplyBranch { repo_path, branch_name } => apply_branch(repo_path, branch_name),
@@ -39,7 +35,7 @@ fn print_help() {
     print!(
         "\
 Usage: guiguitsu [-C <path>] [OPTIONS] [<repo-path>]
-       guiguitsu [-C <path>] init [<repo-path>] --workspace-branch=<branch> --workspace-remote=<remote> --trunk=<branch>
+       guiguitsu [-C <path>] create-config [<repo-path>] --workspace-branch=<branch> [--workspace-remote=<remote>] [--trunk=<branch>] [-A <sha>]
 
 Options:
   -C <path>                        Change to <path> before doing anything
@@ -49,19 +45,24 @@ Options:
   --reread-stacks                  Re-read merge commit parents from git and update config
   --help                           Show this help message
 
-Init options:
+create-config options:
   --workspace-branch=<branch>      Name of the workspace branch to create
-  --workspace-remote=<remote>      Name of the git remote (e.g. origin)
-  --trunk=<branch>                 Name of the trunk branch (e.g. main)
+  --workspace-remote=<remote>      Name of the git remote (default: origin)
+  --trunk=<branch>                 Name of the trunk branch (default: main)
+  -A <sha>                         After creating the config, rebase @ after <sha>
+                                   (requires --merge-commit)
+  --merge-commit=<sha>             SHA of the workspace merge commit (written to config)
 "
     );
 }
 
 enum CliCommand {
     Help,
-    Init {
+    CreateConfig {
         repo_path: PathBuf,
         config: Config,
+        after_sha: Option<String>,
+        merge_commit: Option<String>,
     },
     Run {
         repo_path: PathBuf,
@@ -94,20 +95,24 @@ fn parse_command(args: Vec<String>) -> Result<CliCommand> {
         return Ok(CliCommand::Help);
     }
 
-    if args.first().map(String::as_str) == Some("init") {
-        return parse_init_command(&args[1..]);
+    if args.first().map(String::as_str) == Some("create-config") {
+        return parse_create_config_command(&args[1..]);
     }
 
     parse_run_command(args)
 }
 
-fn parse_init_command(args: &[String]) -> Result<CliCommand> {
+fn parse_create_config_command(args: &[String]) -> Result<CliCommand> {
     let mut repo_arg: Option<PathBuf> = None;
     let mut workspace_branch: Option<String> = None;
     let mut workspace_remote: Option<String> = None;
     let mut trunk: Option<String> = None;
+    let mut after_sha: Option<String> = None;
+    let mut merge_commit: Option<String> = None;
 
-    for arg in args {
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
         if let Some(value) = arg.strip_prefix("--workspace-branch=") {
             if value.is_empty() {
                 bail!("--workspace-branch cannot be empty");
@@ -123,24 +128,43 @@ fn parse_init_command(args: &[String]) -> Result<CliCommand> {
                 bail!("--trunk cannot be empty");
             }
             trunk = Some(value.to_string());
+        } else if let Some(value) = arg.strip_prefix("--merge-commit=") {
+            if value.is_empty() {
+                bail!("--merge-commit cannot be empty");
+            }
+            merge_commit = Some(value.to_string());
+        } else if arg == "-A" {
+            i += 1;
+            let val = args.get(i).ok_or_else(|| anyhow::anyhow!("-A requires a SHA argument"))?;
+            if val.is_empty() {
+                bail!("-A cannot be empty");
+            }
+            after_sha = Some(val.to_string());
         } else if arg.starts_with("--") {
             bail!("unknown argument: {arg}");
         } else if repo_arg.replace(PathBuf::from(arg)).is_some() {
             bail!("unexpected argument: {arg}");
         }
+        i += 1;
     }
 
-    Ok(CliCommand::Init {
+    if after_sha.is_some() && merge_commit.is_none() {
+        bail!("-A requires --merge-commit to be specified");
+    }
+
+    Ok(CliCommand::CreateConfig {
         repo_path: repo_arg
             .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory")),
         config: Config {
             workspace_branch: workspace_branch
                 .ok_or_else(|| anyhow::anyhow!("missing required argument: --workspace-branch=<branch>"))?,
-            workspace_remote: workspace_remote
-                .ok_or_else(|| anyhow::anyhow!("missing required argument: --workspace-remote=<remote>"))?,
-            trunk: trunk.ok_or_else(|| anyhow::anyhow!("missing required argument: --trunk=<main>"))?,
+            workspace_remote: workspace_remote.unwrap_or_else(|| "origin".to_string()),
+            trunk: trunk.unwrap_or_else(|| "main".to_string()),
             parents: vec![],
+            merge_commit: merge_commit.clone(),
         },
+        after_sha,
+        merge_commit,
     })
 }
 
@@ -189,6 +213,26 @@ fn parse_run_command(args: &[String]) -> Result<CliCommand> {
     }
 
     Ok(CliCommand::Run { repo_path, print_stacks })
+}
+
+fn create_config(repo_path: PathBuf, config: Config, after_sha: Option<String>, merge_commit: Option<String>) -> Result<()> {
+    config.validate(&repo_path)?;
+    config.save(&repo_path)?;
+
+    jujutsu::describe_current(&repo_path, "Add guiguitsu configuration")?;
+
+    if let Some(sha) = after_sha {
+        jujutsu::rebase_after(&repo_path, "@", &sha)?;
+    }
+
+    if let Some(ref mc) = merge_commit {
+        jujutsu::new_at(&repo_path, mc)?;
+    }
+
+    if verbose() {
+        println!("Wrote {}", Config::path(&repo_path).display());
+    }
+    Ok(())
 }
 
 fn apply_branch(repo_path: PathBuf, branch_name: String) -> Result<()> {

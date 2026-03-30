@@ -15,6 +15,8 @@ pub struct Config {
     pub trunk: String,
     #[serde(default)]
     pub parents: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_commit: Option<String>,
 }
 
 impl Config {
@@ -26,7 +28,7 @@ impl Config {
         let path = Self::path(repo_path);
         if !path.is_file() {
             bail!(
-                "missing {} in repo. Run: guiguitsu init --workspace-branch=<branch> --workspace-remote=<remote> --trunk=<main>",
+                "missing {} in repo. Run: guiguitsu create-config --workspace-branch=<branch> --workspace-remote=<remote> --trunk=<main>",
                 FILE_NAME
             );
         }

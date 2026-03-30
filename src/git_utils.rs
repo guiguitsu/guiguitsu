@@ -3,7 +3,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::config::{Config, FILE_NAME};
+use crate::config::FILE_NAME;
 
 pub struct CommitInfo {
     pub change_id: String,
@@ -62,69 +62,6 @@ fn validate_tool_requirements() -> Result<()> {
     run_command("git", &["--version"], None)?;
     run_command("jj", &["--version"], None)?;
     Ok(())
-}
-
-pub fn init_repo(repo_path: &Path, config: &Config) -> Result<()> {
-    validate_tool_requirements()?;
-
-    if has_staged_changed(repo_path)? {
-        return Err(anyhow!(
-            "cannot initialize guiguitsu in {} while staged git changes are present",
-            repo_path.display()
-        ));
-    }
-
-    if !repo_path.join(".jj").is_dir() {
-        run_command("jj", &["git", "init", "--colocate"], Some(repo_path))?;
-    }
-
-    crate::jujutsu::ensure_user_config(repo_path)?;
-
-    config.validate(repo_path)?;
-    config.save(repo_path)?;
-
-    if has_file_changes(repo_path, FILE_NAME)? {
-        // Check for an existing merge BEFORE modifying the workspace branch,
-        // since the check relies on workspace pointing at its original tip.
-        let has_existing_merge = local_branch_exists(repo_path, &config.workspace_branch)?
-            && find_existing_workspace_merge(
-                repo_path,
-                &config.workspace_branch,
-                &config.trunk,
-            )?
-            .is_some();
-
-        if local_branch_exists(repo_path, &config.workspace_branch)? {
-            crate::jujutsu::describe_current(repo_path, "Add guiguitsu configuration")?;
-            crate::jujutsu::rebase_after(repo_path, "@", &config.workspace_branch)?;
-            crate::jujutsu::set_bookmark(repo_path, &config.workspace_branch, "@")?;
-        } else {
-            run_git(repo_path, &["checkout", "-b", &config.workspace_branch, &config.trunk])?;
-            run_git(repo_path, &["add", FILE_NAME])?;
-            run_git(repo_path, &["commit", "-m", "Add guiguitsu configuration"])?;
-        }
-        if !has_existing_merge {
-            let head = current_head_sha(repo_path)?;
-            let trunk_sha = run_git(repo_path, &["rev-parse", &config.trunk])?;
-            crate::jujutsu::create_merge_commit(
-                repo_path,
-                "Special workspace merge commit",
-                &[&head, &trunk_sha],
-                true,
-            )?;
-        }
-
-        let mut config = config.clone();
-        config.parents = vec![config.workspace_branch.clone(), config.trunk.clone()];
-        config.save(repo_path)?;
-    }
-
-    Ok(())
-}
-
-fn has_file_changes(repo_path: &Path, file_name: &str) -> Result<bool> {
-    let output = run_git(repo_path, &["status", "--porcelain", "--", file_name])?;
-    Ok(!output.is_empty())
 }
 
 pub(crate) fn local_branch_exists(repo_path: &Path, branch: &str) -> Result<bool> {
@@ -288,13 +225,16 @@ pub fn child_merge_commit(repo_path: &Path, commit_sha: &str) -> Result<String> 
     let mut current = commit_sha.to_string();
     loop {
         let kids = children_of(repo_path, &current, &[])?;
+        eprintln!("[child_merge_commit] current={current}, kids={kids:?}");
         match kids.len() {
             0 => bail!("reached tip without finding a merge commit (at {current})"),
             1 => {
                 let child = &kids[0];
                 if is_merge_commit(repo_path, child)? {
+                    eprintln!("[child_merge_commit] found merge commit: {child}");
                     return Ok(child.clone());
                 }
+                eprintln!("[child_merge_commit] {child} is not a merge, continuing walk");
                 current = child.clone();
             }
             _ => bail!(
@@ -318,24 +258,40 @@ pub fn find_existing_workspace_merge(
     trunk: &str,
 ) -> Result<Option<String>> {
     let workspace_sha = resolve_ref(repo_path, workspace_branch)?;
+    eprintln!("[find_existing_workspace_merge] workspace_sha={workspace_sha}");
 
     let merge_sha = match child_merge_commit(repo_path, &workspace_sha) {
-        Ok(sha) => sha,
-        Err(_) => return Ok(None),
+        Ok(sha) => {
+            eprintln!("[find_existing_workspace_merge] child_merge_commit => Ok({sha})");
+            sha
+        }
+        Err(e) => {
+            eprintln!("[find_existing_workspace_merge] child_merge_commit => Err({e})");
+            return Ok(None);
+        }
     };
 
     let parents = parent_shas(repo_path, &merge_sha)?;
+    eprintln!("[find_existing_workspace_merge] merge parents={parents:?}");
 
     // One parent must be the workspace branch SHA
-    if !parents.contains(&workspace_sha) {
+    let contains_workspace = parents.contains(&workspace_sha);
+    eprintln!("[find_existing_workspace_merge] parents.contains(workspace_sha)={contains_workspace}");
+    if !contains_workspace {
         return Ok(None);
     }
 
     // Another parent must be an ancestor of trunk (or equal to it)
     let trunk_sha = resolve_ref(repo_path, trunk)?;
+    eprintln!("[find_existing_workspace_merge] trunk_sha={trunk_sha}");
     let has_trunk_ancestor = parents.iter().any(|p| {
-        p != &workspace_sha && is_ancestor(repo_path, p, &trunk_sha).unwrap_or(false)
+        let result = p != &workspace_sha && is_ancestor(repo_path, p, &trunk_sha).unwrap_or(false);
+        eprintln!("[find_existing_workspace_merge]   parent {p}: p!=workspace={}, is_ancestor={:?}, result={result}",
+            p != &workspace_sha,
+            is_ancestor(repo_path, p, &trunk_sha));
+        result
     });
+    eprintln!("[find_existing_workspace_merge] has_trunk_ancestor={has_trunk_ancestor}");
 
     if has_trunk_ancestor {
         Ok(Some(merge_sha))
@@ -502,7 +458,7 @@ mod tests {
     use anyhow::{Context, Result, anyhow};
 
     use crate::config::Config;
-    use super::{child_merge_commit, children_of, commits_in_range, create_branch, current_head_sha, find_commit_by_description, find_existing_workspace_merge, has_staged_changed, init_repo, is_merge_commit, parent_shas, run_command, run_git, validate_startup_requirements};
+    use super::{child_merge_commit, children_of, commits_in_range, create_branch, current_head_sha, find_commit_by_description, find_existing_workspace_merge, has_staged_changed, is_merge_commit, parent_shas, run_command, run_git, validate_startup_requirements};
 
     struct TempRepo {
         path: PathBuf,
@@ -630,26 +586,6 @@ mod tests {
         let has_changes = has_staged_changed(&repo.path)?;
 
         assert!(has_changes);
-        Ok(())
-    }
-
-    #[test]
-    fn init_repo_fails_with_staged_changes() -> Result<()> {
-        let repo = TempRepo::create()?;
-        let file_path = repo.path.join("staged.txt");
-
-        fs::write(&file_path, "staged change\n").context("failed to write staged file")?;
-        git(&repo.path, &["add", "staged.txt"])?;
-
-        let config = Config {
-            workspace_branch: "guiguitsu/test".to_string(),
-            workspace_remote: "origin".to_string(),
-            trunk: "main".to_string(),
-            parents: vec![],
-        };
-        let error = init_repo(&repo.path, &config).expect_err("expected staged-change bailout");
-
-        assert!(error.to_string().contains("while staged git changes are present"));
         Ok(())
     }
 
@@ -831,39 +767,6 @@ mod tests {
     }
 
     #[test]
-    fn init_repo_with_existing_branch_commits_config_to_that_branch() -> Result<()> {
-        let repo = TempRepo::create_from("repo_init.sh")?;
-
-        let config = Config {
-            workspace_branch: "workspace".to_string(),
-            workspace_remote: "origin".to_string(),
-            trunk: "main".to_string(),
-            parents: vec![],
-        };
-        init_repo(&repo.path, &config)?;
-
-        // .guiguitsu.json should exist
-        assert!(repo.path.join(crate::config::FILE_NAME).is_file(),
-            ".guiguitsu.json should exist after init");
-
-        // HEAD should be on a merge commit with 2 parents
-        let head = current_head_sha(&repo.path)?;
-        let parents = parent_shas(&repo.path, &head)?;
-        assert_eq!(parents.len(), 2, "HEAD should be a merge commit with 2 parents");
-
-        // The workspace branch should have the config commit
-        let workspace_log = run_git(&repo.path, &["log", "--format=%s", "workspace"])?;
-        assert!(workspace_log.contains("Add guiguitsu configuration"),
-            "workspace branch should have the config commit");
-
-        // Config should have correct parents
-        let saved_config = Config::load(&repo.path)?;
-        assert_eq!(saved_config.parents, vec!["workspace", "main"]);
-
-        Ok(())
-    }
-
-    #[test]
     fn find_existing_workspace_merge_returns_some_when_merge_exists() -> Result<()> {
         let repo = TempRepo::create_from("repo_init_with_merge.sh")?;
 
@@ -887,40 +790,4 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn init_repo_skips_merge_when_one_already_exists() -> Result<()> {
-        let repo = TempRepo::create_from("repo_init_with_merge.sh")?;
-
-        // Count merge commits before init (1: the pre-existing merge)
-        let before_merges: usize = run_git(
-            &repo.path,
-            &["rev-list", "--all", "--min-parents=2", "--count"],
-        )?.trim().parse().unwrap();
-        assert_eq!(before_merges, 1, "precondition: exactly 1 merge commit before init");
-
-        let config = Config {
-            workspace_branch: "workspace".to_string(),
-            workspace_remote: "origin".to_string(),
-            trunk: "main".to_string(),
-            parents: vec![],
-        };
-        init_repo(&repo.path, &config)?;
-
-        // jj's rebase reparents the existing merge (creating a copy in git),
-        // so the total merge count goes to 2 (old + reparented).
-        // Without the skip, init would create an *additional* merge (total 3).
-        let after_merges: usize = run_git(
-            &repo.path,
-            &["rev-list", "--all", "--min-parents=2", "--count"],
-        )?.trim().parse().unwrap();
-        assert_eq!(after_merges, 2,
-            "expected 2 merge commits (original + jj reparented), got {after_merges}; \
-             3 would mean a duplicate merge was created");
-
-        // Config should still be saved correctly
-        let saved_config = Config::load(&repo.path)?;
-        assert_eq!(saved_config.parents, vec!["workspace", "main"]);
-
-        Ok(())
-    }
 }
