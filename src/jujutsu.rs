@@ -9,6 +9,25 @@ fn run_jj(repo_path: &Path, args: &[&str]) -> Result<String> {
     run_command("jj", args, Some(repo_path))
 }
 
+/// Returns true if the string looks like a jj change-id (all lowercase letters, no digits,
+/// and at least one letter beyond 'f' — i.e. not a valid hex string).
+fn is_change_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().all(|c| c.is_ascii_lowercase())
+        && !s.chars().any(|c| c.is_ascii_digit())
+        && s.chars().any(|c| c > 'f')
+}
+
+/// Converts a ref to a git SHA-1. If it's already a SHA-1 (hex), returns it as-is.
+/// If it looks like a jj change-id, resolves it via `jj show`.
+pub fn to_sha1(repo_path: &Path, rev: &str) -> Result<String> {
+    if is_change_id(rev) {
+        run_jj(repo_path, &["show", "-T", "commit_id", "--no-patch", rev])
+    } else {
+        Ok(rev.to_string())
+    }
+}
+
 fn jj_config_get(repo_path: &Path, key: &str) -> Result<String> {
     run_jj(repo_path, &["config", "get", key])
 }

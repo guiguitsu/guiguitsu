@@ -100,7 +100,7 @@ cat <<'CONF' > .guiguitsu.json
   "workspace_branch": "workspace",
   "workspace_remote": "origin",
   "trunk": "main",
-  "parents": []
+  "stacks": []
 }
 CONF
 jj desc -m "Add guiguitsu configuration"
@@ -111,16 +111,13 @@ workspace_sha="$(git rev-parse workspace)"
 main_sha="$(git rev-parse main)"
 jj new -m "Special workspace merge commit" "$workspace_sha" "$main_sha"
 
-# Update config with parents
+# Update config with stacks (no extra stack branches beyond workspace+trunk)
 cat <<'CONF' > .guiguitsu.json
 {
   "workspace_branch": "workspace",
   "workspace_remote": "origin",
   "trunk": "main",
-  "parents": [
-    "workspace",
-    "main"
-  ]
+  "stacks": []
 }
 CONF
 jj desc -m "Special workspace merge commit"

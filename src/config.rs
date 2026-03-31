@@ -9,12 +9,16 @@ use crate::git_utils;
 pub const FILE_NAME: &str = ".guiguitsu.json";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct StackEntry {
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
     pub workspace_branch: String,
     pub workspace_remote: String,
     pub trunk: String,
-    #[serde(default)]
-    pub parents: Vec<String>,
+    pub stacks: Vec<StackEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_commit: Option<String>,
 }

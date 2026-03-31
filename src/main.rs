@@ -152,6 +152,8 @@ fn parse_create_config_command(args: &[String]) -> Result<CliCommand> {
         bail!("-A requires --merge-commit to be specified");
     }
 
+    let trunk = trunk.unwrap_or_else(|| "main".to_string());
+
     Ok(CliCommand::CreateConfig {
         repo_path: repo_arg
             .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory")),
@@ -159,8 +161,11 @@ fn parse_create_config_command(args: &[String]) -> Result<CliCommand> {
             workspace_branch: workspace_branch
                 .ok_or_else(|| anyhow::anyhow!("missing required argument: --workspace-branch=<branch>"))?,
             workspace_remote: workspace_remote.unwrap_or_else(|| "origin".to_string()),
-            trunk: trunk.unwrap_or_else(|| "main".to_string()),
-            parents: vec![],
+            stacks: vec![
+                config::StackEntry { name: "workspace".to_string() },
+                config::StackEntry { name: trunk.clone() },
+            ],
+            trunk,
             merge_commit: merge_commit.clone(),
         },
         after_sha,
@@ -215,23 +220,47 @@ fn parse_run_command(args: &[String]) -> Result<CliCommand> {
     Ok(CliCommand::Run { repo_path, print_stacks })
 }
 
-fn create_config(repo_path: PathBuf, config: Config, after_sha: Option<String>, merge_commit: Option<String>) -> Result<()> {
+fn create_config(repo_path: PathBuf, mut config: Config, after_sha: Option<String>, merge_commit: Option<String>) -> Result<()> {
     config.validate(&repo_path)?;
+
+    if let Some(ref mc) = config.merge_commit {
+        config.merge_commit = Some(jujutsu::to_sha1(&repo_path, mc)?);
+    }
+
+    if let Some(ref mc) = config.merge_commit {
+        let git_parents = git_utils::parent_shas(&repo_path, mc)?;
+        for i in 2..git_parents.len() {
+            config.stacks.push(config::StackEntry {
+                name: format!("stack{}", i - 1),
+            });
+        }
+    }
+
+    let already_exists = Config::path(&repo_path).is_file();
     config.save(&repo_path)?;
 
-    jujutsu::describe_current(&repo_path, "Add guiguitsu configuration")?;
+    if verbose() {
+        let path = Config::path(&repo_path);
+        println!("Wrote {}", path.display());
+        let contents = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        println!("{contents}");
+    }
 
-    if let Some(sha) = after_sha {
-        jujutsu::rebase_after(&repo_path, "@", &sha)?;
+    if already_exists {
+        jujutsu::absorb(&repo_path, &[config::FILE_NAME])?;
+    } else {
+        jujutsu::describe_current(&repo_path, "Add guiguitsu configuration")?;
+
+        if let Some(sha) = after_sha {
+            jujutsu::rebase_after(&repo_path, "@", &sha)?;
+        }
     }
 
     if let Some(ref mc) = merge_commit {
         jujutsu::new_at(&repo_path, mc)?;
     }
 
-    if verbose() {
-        println!("Wrote {}", Config::path(&repo_path).display());
-    }
     Ok(())
 }
 
@@ -253,7 +282,10 @@ fn apply_branch(repo_path: PathBuf, branch_name: String) -> Result<()> {
     // After rebase the working copy may have moved; park it back on top of the merge commit.
     jujutsu::new_at(&repo_path, &new_merge_sha)?;
 
-    config.parents.push(branch_name);
+    let stack_count = config.stacks.iter().filter(|s| s.name != "workspace" && s.name != config.trunk).count();
+    config.stacks.push(config::StackEntry {
+        name: format!("stack{}", stack_count + 1),
+    });
     config.save(&repo_path)?;
     Ok(())
 }
@@ -261,30 +293,27 @@ fn apply_branch(repo_path: PathBuf, branch_name: String) -> Result<()> {
 fn reread_stacks(repo_path: PathBuf) -> Result<()> {
     git_utils::validate_startup_requirements(&repo_path)?;
     let mut config = Config::load(&repo_path)?;
-    let old_parents = config.parents.clone();
     let (_merge_sha, git_parents) = git_utils::find_workspace_merge_commit(&repo_path)?;
 
-    let mut parents = Vec::with_capacity(git_parents.len());
-    for (i, sha) in git_parents.iter().enumerate() {
-        let name = match i {
-            0 => config.workspace_branch.clone(),
-            1 => config.trunk.clone(),
-            _ => git_utils::branch_name_for(&repo_path, sha)?,
-        };
-        parents.push(name);
+    // git_parents[0] = workspace, [1] = trunk, [2..] = stacks
+    let mut stacks = vec![
+        config::StackEntry { name: "workspace".to_string() },
+        config::StackEntry { name: config.trunk.clone() },
+    ];
+    for i in 2..git_parents.len() {
+        stacks.push(config::StackEntry {
+            name: format!("stack{}", i - 1),
+        });
     }
 
-    config.parents = parents;
+    config.stacks = stacks;
     config.save(&repo_path)?;
-
-    if config.parents != old_parents {
-        jujutsu::absorb(&repo_path, &[config::FILE_NAME])?;
-    }
+    jujutsu::absorb(&repo_path, &[config::FILE_NAME])?;
 
     if verbose() {
-        println!("Updated parents:");
-        for (i, name) in config.parents.iter().enumerate() {
-            println!("  [{}] {}", i, name);
+        println!("Updated stacks:");
+        for (i, entry) in config.stacks.iter().enumerate() {
+            println!("  [{}] {}", i, entry.name);
         }
     }
     Ok(())
@@ -295,24 +324,41 @@ fn run_app(repo_path: PathBuf, print_stacks: bool) -> Result<()> {
 
     git_utils::validate_startup_requirements(&repo_path)?;
     let config = Config::load(&repo_path)?;
-    let provider = GitStackProvider::new(repo_path.clone(), config.parents.clone());
+    let stack_names: Vec<String> = config.stacks.iter()
+        .filter(|s| s.name != "workspace" && s.name != config.trunk)
+        .map(|s| s.name.clone())
+        .collect();
+    let provider = GitStackProvider::new(repo_path.clone(), config.trunk.clone(), stack_names.clone());
     let stacks = provider.get_stacks()?;
 
     if print_stacks {
-        let (_merge_sha, merge_parents) = git_utils::find_workspace_merge_commit(&repo_path)?;
-        let trunk_head = &merge_parents[1];
-        let trunk_subject = git_utils::commit_subject(&repo_path, trunk_head)?;
-        println!("Stack: {} (head: {} - {})", config.trunk, &trunk_head[..8.min(trunk_head.len())], trunk_subject);
+        const RESET: &str = "\x1b[0m";
+        const RED: &str = "\x1b[31m";
+        const CYAN: &str = "\x1b[36m";
+
+        let trunk_remote_ref = config.base_ref();
         for stack in &stacks {
-            let head = stack.head_commit_id().unwrap_or("(empty)");
-            let head_subject = git_utils::commit_subject(&repo_path, head).unwrap_or_default();
-            let base = &stack.base_commit_id;
-            let base_subject = git_utils::commit_subject(&repo_path, base).unwrap_or_default();
-            println!("Stack: {} (head: {} - {}, base: {} - {})", stack.name, &head[..8.min(head.len())], head_subject, &base[..8.min(base.len())], base_subject);
-            for commit in &stack.commits {
-                println!("  {} {}", &commit.commit_id[..8.min(commit.commit_id.len())], commit.description);
+            let is_trunk = stack.name == config.trunk;
+            let head_sha = stack.head_commit_id().unwrap_or(&stack.base_commit_id);
+            let head_subject = git_utils::commit_subject(&repo_path, head_sha).unwrap_or_default();
+            if is_trunk {
+                println!("{CYAN}Stack: {} (head: {} - {}){RESET}", stack.name, &head_sha[..8.min(head_sha.len())], head_subject);
+            } else {
+                let base = &stack.base_commit_id;
+                let base_subject = git_utils::commit_subject(&repo_path, base).unwrap_or_default();
+                let rebase_notice = if git_utils::is_ancestor(&repo_path, base, &trunk_remote_ref).unwrap_or(false) {
+                    format!(" {RED}(needs rebase){RESET}")
+                } else {
+                    String::new()
+                };
+                println!("{CYAN}Stack: {} (head: {} - {}, base: {} - {}){RESET}{rebase_notice}", stack.name, &head_sha[..8.min(head_sha.len())], head_subject, &base[..8.min(base.len())], base_subject);
+                for commit in &stack.commits {
+                    println!("  {} {}", &commit.commit_id[..8.min(commit.commit_id.len())], commit.description);
+                }
             }
         }
+        println!();
+        println!("Rebase your stacks with \"gg rebase\"");
         return Ok(());
     }
 
@@ -323,10 +369,10 @@ fn run_app(repo_path: PathBuf, print_stacks: bool) -> Result<()> {
     let reload: Rc<dyn Fn()> = {
         let app_weak = app.as_weak();
         let repo_path = repo_path.clone();
-        let parents = config.parents.clone();
+        let stack_names = stack_names.clone();
         Rc::new(move || {
             let app = match app_weak.upgrade() { Some(a) => a, None => return };
-            let provider = GitStackProvider::new(repo_path.clone(), parents.clone());
+            let provider = GitStackProvider::new(repo_path.clone(), config.trunk.clone(), stack_names.clone());
             match provider.get_stacks() {
                 Ok(stacks) => app.set_stacks(models::build_stacks_model(&stacks)),
                 Err(e) => eprintln!("failed to reload stacks: {e}"),
@@ -447,26 +493,30 @@ mod tests {
         apply_branch(repo.path.clone(), "foo".to_string())?;
 
         let config = crate::config::Config::load(&repo.path)?;
-        let provider = GitStackProvider::new(repo.path.clone(), config.parents.clone());
+        let stack_names: Vec<String> = config.stacks.iter()
+            .filter(|s| s.name != "workspace" && s.name != config.trunk)
+            .map(|s| s.name.clone())
+            .collect();
+        let provider = GitStackProvider::new(repo.path.clone(), config.trunk.clone(), stack_names);
         let stacks = provider.get_stacks()?;
         let names: Vec<&str> = stacks.iter().map(|s| s.name.as_str()).collect();
 
-        assert!(names.contains(&"foo"), "expected 'foo' in stacks, got: {names:?}");
+        assert!(names.contains(&"stack1"), "expected 'stack1' in stacks, got: {names:?}");
         Ok(())
     }
 
     #[test]
-    fn apply_branch_updates_config_parents() -> Result<()> {
+    fn apply_branch_updates_config_stacks() -> Result<()> {
         let repo = TempRepo::create()?;
 
         apply_branch(repo.path.clone(), "bar".to_string())?;
 
         let config = crate::config::Config::load(&repo.path)?;
         assert_eq!(
-            config.parents.last().map(String::as_str),
-            Some("bar"),
-            "expected 'bar' as last parent in config, got: {:?}",
-            config.parents
+            config.stacks.last().map(|s| s.name.as_str()),
+            Some("stack1"),
+            "expected 'stack1' as last stack in config, got: {:?}",
+            config.stacks
         );
         Ok(())
     }
