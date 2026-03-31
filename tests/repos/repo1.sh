@@ -100,7 +100,10 @@ cat <<'CONF' > .guiguitsu.json
   "workspace_branch": "workspace",
   "workspace_remote": "origin",
   "trunk": "main",
-  "stacks": []
+  "stacks": [
+    { "name": "workspace" },
+    { "name": "main" }
+  ]
 }
 CONF
 jj desc -m "Add guiguitsu configuration"
@@ -117,7 +120,10 @@ cat <<'CONF' > .guiguitsu.json
   "workspace_branch": "workspace",
   "workspace_remote": "origin",
   "trunk": "main",
-  "stacks": []
+  "stacks": [
+    { "name": "workspace" },
+    { "name": "main" }
+  ]
 }
 CONF
 jj desc -m "Special workspace merge commit"

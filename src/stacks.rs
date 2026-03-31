@@ -24,12 +24,14 @@ pub trait StackProvider {
 pub struct GitStackProvider {
     repo_path: PathBuf,
     trunk_name: String,
-    stack_names: Vec<String>,
+    /// Ordered stack names from config — each index corresponds to the same
+    /// index in the merge commit's parent list.
+    config_stacks: Vec<String>,
 }
 
 impl GitStackProvider {
-    pub fn new(repo_path: PathBuf, trunk_name: String, stack_names: Vec<String>) -> Self {
-        Self { repo_path, trunk_name, stack_names }
+    pub fn new(repo_path: PathBuf, trunk_name: String, config_stacks: Vec<String>) -> Self {
+        Self { repo_path, trunk_name, config_stacks }
     }
 }
 
@@ -49,47 +51,38 @@ impl StackProvider for GitStackProvider {
             }
         };
 
-        // stack_names covers git parents from index 2 onward (skip workspace + trunk)
-        let expected_count = git_parents.len().saturating_sub(2);
-        if self.stack_names.len() != expected_count {
+        if self.config_stacks.len() != git_parents.len() {
             bail!(
-                "config stacks count ({}) does not match git merge parents count ({} total, {} stacks expected)",
-                self.stack_names.len(),
+                "config stacks count ({}) does not match git merge parents count ({})",
+                self.config_stacks.len(),
                 git_parents.len(),
-                expected_count,
             );
         }
 
-        // parent[1] is trunk per init_repo convention
-        let trunk_parent = &git_parents[1];
+        // Find the trunk parent SHA using config ordering
+        let trunk_index = self.config_stacks.iter()
+            .position(|s| s == &self.trunk_name)
+            .ok_or_else(|| anyhow::anyhow!("trunk '{}' not found in config stacks", self.trunk_name))?;
+        let trunk_sha = &git_parents[trunk_index];
+
         let mut stacks = Vec::new();
-
-        // parent[0] = workspace
-        let workspace_commits = commits_in_range(&self.repo_path, trunk_parent, &git_parents[0])?;
-        let workspace_base = merge_base(&self.repo_path, trunk_parent, &git_parents[0])?;
-        stacks.push(StackInfo {
-            name: "workspace".to_string(),
-            commits: workspace_commits,
-            base_commit_id: workspace_base,
-        });
-
-        // parent[1] = trunk
-        stacks.push(StackInfo {
-            name: self.trunk_name.clone(),
-            commits: vec![],
-            base_commit_id: trunk_parent.clone(),
-        });
-
-        // parent[2..] = stack branches
-        for (i, parent_sha) in git_parents.iter().enumerate().skip(2) {
-            let name = self.stack_names[i - 2].clone();
-            let base = merge_base(&self.repo_path, trunk_parent, parent_sha)?;
-            let commits = commits_in_range(&self.repo_path, trunk_parent, parent_sha)?;
-            stacks.push(StackInfo {
-                name,
-                commits,
-                base_commit_id: base,
-            });
+        for (i, name) in self.config_stacks.iter().enumerate() {
+            let parent_sha = &git_parents[i];
+            if name == &self.trunk_name {
+                stacks.push(StackInfo {
+                    name: self.trunk_name.clone(),
+                    commits: vec![],
+                    base_commit_id: trunk_sha.clone(),
+                });
+            } else {
+                let base = merge_base(&self.repo_path, trunk_sha, parent_sha)?;
+                let commits = commits_in_range(&self.repo_path, trunk_sha, parent_sha)?;
+                stacks.push(StackInfo {
+                    name: name.clone(),
+                    commits,
+                    base_commit_id: base,
+                });
+            }
         }
 
         Ok(stacks)
@@ -147,7 +140,7 @@ mod tests {
     fn get_stacks_returns_workspace_and_trunk_from_repo1() -> Result<()> {
         let repo = TempRepo::create()?;
         // repo1 has 2 merge parents (workspace + main), so 0 extra stack entries
-        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string(), vec![]);
+        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string(), vec!["workspace".to_string(), "main".to_string()]);
 
         let stacks = provider.get_stacks()?;
 
@@ -158,7 +151,7 @@ mod tests {
     #[test]
     fn get_stacks_returns_correct_stack_names_from_repo1() -> Result<()> {
         let repo = TempRepo::create()?;
-        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string(), vec![]);
+        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string(), vec!["workspace".to_string(), "main".to_string()]);
 
         let stacks = provider.get_stacks()?;
 
@@ -170,7 +163,7 @@ mod tests {
     #[test]
     fn base_commit_id_is_fork_point() -> Result<()> {
         let repo = TempRepo::create()?;
-        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string(), vec![]);
+        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string(), vec!["workspace".to_string(), "main".to_string()]);
 
         let stacks = provider.get_stacks()?;
         let stack = &stacks[0];
@@ -189,7 +182,7 @@ mod tests {
     #[test]
     fn head_commit_id_is_first_commit_in_stack() -> Result<()> {
         let repo = TempRepo::create()?;
-        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string(), vec![]);
+        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string(), vec!["workspace".to_string(), "main".to_string()]);
 
         let stacks = provider.get_stacks()?;
         let stack = &stacks[0];
@@ -212,12 +205,11 @@ mod tests {
     #[test]
     fn get_stacks_errors_on_stack_count_mismatch() -> Result<()> {
         let repo = TempRepo::create()?;
-        // The repo has 2 merge parents (workspace + trunk), so 0 stacks expected,
-        // but we pass 1 stack name — should error.
+        // The repo has 2 merge parents, but we pass 3 config stacks — should error.
         let provider = GitStackProvider::new(
             repo.path.clone(),
             "main".to_string(),
-            vec!["extra".to_string()],
+            vec!["workspace".to_string(), "main".to_string(), "extra".to_string()],
         );
 
         match provider.get_stacks() {

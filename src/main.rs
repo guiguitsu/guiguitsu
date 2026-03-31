@@ -27,6 +27,7 @@ fn main() -> Result<()> {
         }
         CliCommand::Run { repo_path, print_stacks } => run_app(repo_path, print_stacks),
         CliCommand::ApplyBranch { repo_path, branch_name } => apply_branch(repo_path, branch_name),
+        CliCommand::RemoveStack { repo_path, stack_name } => remove_stack(repo_path, stack_name),
         CliCommand::RereadStacks { repo_path } => reread_stacks(repo_path),
     }
 }
@@ -41,6 +42,7 @@ Options:
   -C <path>                        Change to <path> before doing anything
   --apply-branch <branch>          Add <branch> as a parent of the workspace merge commit,
                                    creating it off trunk if it does not exist
+  --remove-stack <name>            Remove a stack from the workspace merge commit
   --print-stacks                   Print stacks to stdout and exit (no GUI)
   --reread-stacks                  Re-read merge commit parents from git and update config
   --help                           Show this help message
@@ -71,6 +73,10 @@ enum CliCommand {
     ApplyBranch {
         repo_path: PathBuf,
         branch_name: String,
+    },
+    RemoveStack {
+        repo_path: PathBuf,
+        stack_name: String,
     },
     RereadStacks {
         repo_path: PathBuf,
@@ -178,6 +184,7 @@ fn parse_run_command(args: &[String]) -> Result<CliCommand> {
     let mut print_stacks = false;
     let mut reread_stacks = false;
     let mut apply_branch: Option<String> = None;
+    let mut remove_stack: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -198,6 +205,18 @@ fn parse_run_command(args: &[String]) -> Result<CliCommand> {
                 bail!("--apply-branch cannot be empty");
             }
             apply_branch = Some(val.to_string());
+        } else if let Some(val) = arg.strip_prefix("--remove-stack=") {
+            if val.is_empty() {
+                bail!("--remove-stack cannot be empty");
+            }
+            remove_stack = Some(val.to_string());
+        } else if arg == "--remove-stack" {
+            i += 1;
+            let val = args.get(i).ok_or_else(|| anyhow::anyhow!("--remove-stack requires a stack name"))?;
+            if val.is_empty() {
+                bail!("--remove-stack cannot be empty");
+            }
+            remove_stack = Some(val.to_string());
         } else if arg.starts_with("--") {
             bail!("unknown argument: {arg}");
         } else if repo_arg.replace(PathBuf::from(arg)).is_some() {
@@ -211,6 +230,10 @@ fn parse_run_command(args: &[String]) -> Result<CliCommand> {
 
     if let Some(branch_name) = apply_branch {
         return Ok(CliCommand::ApplyBranch { repo_path, branch_name });
+    }
+
+    if let Some(stack_name) = remove_stack {
+        return Ok(CliCommand::RemoveStack { repo_path, stack_name });
     }
 
     if reread_stacks {
@@ -290,6 +313,42 @@ fn apply_branch(repo_path: PathBuf, branch_name: String) -> Result<()> {
     Ok(())
 }
 
+fn remove_stack(repo_path: PathBuf, stack_name: String) -> Result<()> {
+    git_utils::validate_startup_requirements(&repo_path)?;
+    let mut config = Config::load(&repo_path)?;
+
+    let stack_index = config.stacks.iter().position(|s| s.name == stack_name)
+        .ok_or_else(|| anyhow::anyhow!("stack '{}' not found in config", stack_name))?;
+
+    if stack_name == "workspace" || stack_name == config.trunk {
+        bail!("cannot remove the '{}' stack", stack_name);
+    }
+
+    let (merge_sha, parents) = git_utils::find_workspace_merge_commit(&repo_path)?;
+
+    if stack_index >= parents.len() {
+        bail!(
+            "stack index {} is out of range (merge commit has {} parents)",
+            stack_index, parents.len()
+        );
+    }
+
+    let new_parents: Vec<String> = parents.into_iter()
+        .enumerate()
+        .filter(|(i, _)| *i != stack_index)
+        .map(|(_, p)| p)
+        .collect();
+
+    let new_merge_sha = jujutsu::rebase_merge_commit(&repo_path, &merge_sha, &new_parents)?;
+    jujutsu::new_at(&repo_path, &new_merge_sha)?;
+
+    config.stacks.remove(stack_index);
+    config.save(&repo_path)?;
+    jujutsu::absorb(&repo_path, &[config::FILE_NAME])?;
+
+    Ok(())
+}
+
 fn reread_stacks(repo_path: PathBuf) -> Result<()> {
     git_utils::validate_startup_requirements(&repo_path)?;
     let mut config = Config::load(&repo_path)?;
@@ -324,11 +383,8 @@ fn run_app(repo_path: PathBuf, print_stacks: bool) -> Result<()> {
 
     git_utils::validate_startup_requirements(&repo_path)?;
     let config = Config::load(&repo_path)?;
-    let stack_names: Vec<String> = config.stacks.iter()
-        .filter(|s| s.name != "workspace" && s.name != config.trunk)
-        .map(|s| s.name.clone())
-        .collect();
-    let provider = GitStackProvider::new(repo_path.clone(), config.trunk.clone(), stack_names.clone());
+    let config_stacks: Vec<String> = config.stacks.iter().map(|s| s.name.clone()).collect();
+    let provider = GitStackProvider::new(repo_path.clone(), config.trunk.clone(), config_stacks.clone());
     let stacks = provider.get_stacks()?;
 
     if print_stacks {
@@ -369,10 +425,10 @@ fn run_app(repo_path: PathBuf, print_stacks: bool) -> Result<()> {
     let reload: Rc<dyn Fn()> = {
         let app_weak = app.as_weak();
         let repo_path = repo_path.clone();
-        let stack_names = stack_names.clone();
+        let config_stacks = config_stacks.clone();
         Rc::new(move || {
             let app = match app_weak.upgrade() { Some(a) => a, None => return };
-            let provider = GitStackProvider::new(repo_path.clone(), config.trunk.clone(), stack_names.clone());
+            let provider = GitStackProvider::new(repo_path.clone(), config.trunk.clone(), config_stacks.clone());
             match provider.get_stacks() {
                 Ok(stacks) => app.set_stacks(models::build_stacks_model(&stacks)),
                 Err(e) => eprintln!("failed to reload stacks: {e}"),
@@ -493,14 +549,12 @@ mod tests {
         apply_branch(repo.path.clone(), "foo".to_string())?;
 
         let config = crate::config::Config::load(&repo.path)?;
-        let stack_names: Vec<String> = config.stacks.iter()
-            .filter(|s| s.name != "workspace" && s.name != config.trunk)
-            .map(|s| s.name.clone())
-            .collect();
-        let provider = GitStackProvider::new(repo.path.clone(), config.trunk.clone(), stack_names);
+        let config_stacks: Vec<String> = config.stacks.iter().map(|s| s.name.clone()).collect();
+        let provider = GitStackProvider::new(repo.path.clone(), config.trunk.clone(), config_stacks);
         let stacks = provider.get_stacks()?;
         let names: Vec<&str> = stacks.iter().map(|s| s.name.as_str()).collect();
 
+        assert_eq!(names.len(), 3, "expected 3 stacks, got: {names:?}");
         assert!(names.contains(&"stack1"), "expected 'stack1' in stacks, got: {names:?}");
         Ok(())
     }
