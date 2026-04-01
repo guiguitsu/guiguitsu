@@ -25,10 +25,11 @@ fn main() -> Result<()> {
         CliCommand::CreateConfig { repo_path, config, after_sha, merge_commit } => {
             create_config(repo_path, config, after_sha, merge_commit)
         }
-        CliCommand::Run { repo_path, print_stacks } => run_app(repo_path, print_stacks),
+        CliCommand::Run { repo_path, print_stacks, verbose } => run_app(repo_path, print_stacks, verbose),
         CliCommand::ApplyBranch { repo_path, branch_name } => apply_branch(repo_path, branch_name),
         CliCommand::RemoveStack { repo_path, stack_name } => remove_stack(repo_path, stack_name),
         CliCommand::RereadStacks { repo_path } => reread_stacks(repo_path),
+        CliCommand::Rebase { repo_path } => rebase_stacks(repo_path),
     }
 }
 
@@ -44,6 +45,7 @@ Options:
                                    creating it off trunk if it does not exist
   --remove-stack <name>            Remove a stack from the workspace merge commit
   --print-stacks                   Print stacks to stdout and exit (no GUI)
+  -v, --verbose                    Show extra details (e.g. root commit with --print-stacks)
   --reread-stacks                  Re-read merge commit parents from git and update config
   --help                           Show this help message
 
@@ -54,6 +56,10 @@ create-config options:
   -A <sha>                         After creating the config, rebase @ after <sha>
                                    (requires --merge-commit)
   --merge-commit=<sha>             SHA of the workspace merge commit (written to config)
+
+Subcommands:
+  rebase [<repo-path>]             Rebase workspace merge commit so its trunk
+                                   parent points to the latest remote trunk
 "
     );
 }
@@ -69,6 +75,7 @@ enum CliCommand {
     Run {
         repo_path: PathBuf,
         print_stacks: bool,
+        verbose: bool,
     },
     ApplyBranch {
         repo_path: PathBuf,
@@ -79,6 +86,9 @@ enum CliCommand {
         stack_name: String,
     },
     RereadStacks {
+        repo_path: PathBuf,
+    },
+    Rebase {
         repo_path: PathBuf,
     },
 }
@@ -103,6 +113,12 @@ fn parse_command(args: Vec<String>) -> Result<CliCommand> {
 
     if args.first().map(String::as_str) == Some("create-config") {
         return parse_create_config_command(&args[1..]);
+    }
+
+    if args.first().map(String::as_str) == Some("rebase") {
+        let repo_path = args.get(1).map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory"));
+        return Ok(CliCommand::Rebase { repo_path });
     }
 
     parse_run_command(args)
@@ -182,6 +198,7 @@ fn parse_create_config_command(args: &[String]) -> Result<CliCommand> {
 fn parse_run_command(args: &[String]) -> Result<CliCommand> {
     let mut repo_arg: Option<PathBuf> = None;
     let mut print_stacks = false;
+    let mut verbose = false;
     let mut reread_stacks = false;
     let mut apply_branch: Option<String> = None;
     let mut remove_stack: Option<String> = None;
@@ -191,6 +208,8 @@ fn parse_run_command(args: &[String]) -> Result<CliCommand> {
         let arg = &args[i];
         if arg == "--print-stacks" {
             print_stacks = true;
+        } else if arg == "-v" || arg == "--verbose" {
+            verbose = true;
         } else if arg == "--reread-stacks" {
             reread_stacks = true;
         } else if let Some(val) = arg.strip_prefix("--apply-branch=") {
@@ -240,18 +259,17 @@ fn parse_run_command(args: &[String]) -> Result<CliCommand> {
         return Ok(CliCommand::RereadStacks { repo_path });
     }
 
-    Ok(CliCommand::Run { repo_path, print_stacks })
+    Ok(CliCommand::Run { repo_path, print_stacks, verbose })
 }
 
 fn create_config(repo_path: PathBuf, mut config: Config, after_sha: Option<String>, merge_commit: Option<String>) -> Result<()> {
     config.validate(&repo_path)?;
 
     if let Some(ref mc) = config.merge_commit {
-        config.merge_commit = Some(jujutsu::to_sha1(&repo_path, mc)?);
-    }
-
-    if let Some(ref mc) = config.merge_commit {
-        let git_parents = git_utils::parent_shas(&repo_path, mc)?;
+        // Resolve to SHA for the git parent_shas lookup, but keep the original
+        // ref (possibly a jj change-id) in the config as-is.
+        let sha = jujutsu::to_sha1(&repo_path, mc)?;
+        let git_parents = git_utils::parent_shas(&repo_path, &sha)?;
         for i in 2..git_parents.len() {
             config.stacks.push(config::StackEntry {
                 name: format!("stack{}", i - 1),
@@ -378,7 +396,51 @@ fn reread_stacks(repo_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn run_app(repo_path: PathBuf, print_stacks: bool) -> Result<()> {
+fn rebase_stacks(repo_path: PathBuf) -> Result<()> {
+    git_utils::validate_startup_requirements(&repo_path)?;
+    let mut config = Config::load(&repo_path)?;
+
+    let merge_ref = config.merge_commit.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("no merge_commit in config; run with --print-stacks first or set it manually"))?
+        .clone();
+
+    // Resolve to SHA for the git parent_shas lookup, but keep the original
+    // ref (possibly a jj change-id) so we pass it to `jj rebase -s` as-is.
+    let merge_sha = jujutsu::to_sha1(&repo_path, &merge_ref)?;
+    let mut parents = git_utils::parent_shas(&repo_path, &merge_sha)?;
+
+    // The trunk parent is at the index of the trunk entry in config.stacks.
+    let trunk_index = config.stacks.iter().position(|s| s.name == config.trunk)
+        .ok_or_else(|| anyhow::anyhow!("trunk '{}' not found in config stacks", config.trunk))?;
+
+    if trunk_index >= parents.len() {
+        bail!(
+            "trunk index {} is out of range (merge commit has {} parents)",
+            trunk_index, parents.len()
+        );
+    }
+
+    // Use jj's trunk@remote syntax so jj resolves it directly.
+    let trunk_remote_ref = format!("{}@{}", config.trunk, config.workspace_remote);
+    parents[trunk_index] = trunk_remote_ref.clone();
+
+    jujutsu::rebase_source(&repo_path, &merge_ref, &parents)?;
+
+    jujutsu::new_only(&repo_path, &merge_ref)?;
+
+    println!("Rebased workspace merge commit onto {}", &trunk_remote_ref);
+
+    let conflicts = jujutsu::resolve_list(&repo_path)?;
+    if !conflicts.is_empty() {
+        println!("\nConflicted files:\n{}", conflicts);
+        let status = jujutsu::status(&repo_path)?;
+        println!("\nStatus:\n{}", status);
+    }
+
+    Ok(())
+}
+
+fn run_app(repo_path: PathBuf, print_stacks: bool, verbose: bool) -> Result<()> {
     use stacks::{GitStackProvider, StackProvider};
 
     git_utils::validate_startup_requirements(&repo_path)?;
@@ -391,6 +453,9 @@ fn run_app(repo_path: PathBuf, print_stacks: bool) -> Result<()> {
         const RESET: &str = "\x1b[0m";
         const RED: &str = "\x1b[31m";
         const CYAN: &str = "\x1b[36m";
+        const GREEN: &str = "\x1b[32m";
+        const YELLOW: &str = "\x1b[33m";
+        const MAGENTA: &str = "\x1b[35m";
 
         let trunk_remote_ref = config.base_ref();
         for stack in &stacks {
@@ -398,7 +463,8 @@ fn run_app(repo_path: PathBuf, print_stacks: bool) -> Result<()> {
             let head_sha = stack.head_commit_id().unwrap_or(&stack.base_commit_id);
             let head_subject = git_utils::commit_subject(&repo_path, head_sha).unwrap_or_default();
             if is_trunk {
-                println!("{CYAN}Stack: {} (head: {} - {}){RESET}", stack.name, &head_sha[..8.min(head_sha.len())], head_subject);
+                print!("{CYAN}Stack: {}{RESET}", stack.name);
+                println!(" ({GREEN}head: {} - {}{RESET})", &head_sha[..8.min(head_sha.len())], head_subject);
             } else {
                 let base = &stack.base_commit_id;
                 let base_subject = git_utils::commit_subject(&repo_path, base).unwrap_or_default();
@@ -407,7 +473,16 @@ fn run_app(repo_path: PathBuf, print_stacks: bool) -> Result<()> {
                 } else {
                     String::new()
                 };
-                println!("{CYAN}Stack: {} (head: {} - {}, base: {} - {}){RESET}{rebase_notice}", stack.name, &head_sha[..8.min(head_sha.len())], head_subject, &base[..8.min(base.len())], base_subject);
+                print!("{CYAN}Stack: {}{RESET}", stack.name);
+                print!(" ({GREEN}head: {} - {}{RESET}", &head_sha[..8.min(head_sha.len())], head_subject);
+                print!(", {YELLOW}base: {} - {}{RESET}", &base[..8.min(base.len())], base_subject);
+                if verbose {
+                    if let Some(root) = stack.root_commit_id() {
+                        let root_subject = git_utils::commit_subject(&repo_path, root).unwrap_or_default();
+                        print!(", {MAGENTA}root: {} - {}{RESET}", &root[..8.min(root.len())], root_subject);
+                    }
+                }
+                println!("){rebase_notice}");
                 for commit in &stack.commits {
                     println!("  {} {}", &commit.commit_id[..8.min(commit.commit_id.len())], commit.description);
                 }

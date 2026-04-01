@@ -15,6 +15,10 @@ impl StackInfo {
     pub fn head_commit_id(&self) -> Option<&str> {
         self.commits.first().map(|c| c.commit_id.as_str())
     }
+
+    pub fn root_commit_id(&self) -> Option<&str> {
+        self.commits.last().map(|c| c.commit_id.as_str())
+    }
 }
 
 pub trait StackProvider {
@@ -200,6 +204,29 @@ mod tests {
             base_commit_id: "abc123".to_string(),
         };
         assert!(stack.head_commit_id().is_none());
+    }
+
+    #[test]
+    fn root_commit_id_is_last_commit_in_stack() -> Result<()> {
+        let repo = TempRepo::create()?;
+        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string(), vec!["workspace".to_string(), "main".to_string()]);
+
+        let stacks = provider.get_stacks()?;
+        let stack = &stacks[0];
+
+        let root = stack.root_commit_id().expect("stack should not be empty");
+        assert_eq!(root, stack.commits.last().unwrap().commit_id);
+        Ok(())
+    }
+
+    #[test]
+    fn root_commit_id_returns_none_for_empty_commits() {
+        let stack = super::StackInfo {
+            name: "empty".to_string(),
+            commits: vec![],
+            base_commit_id: "abc123".to_string(),
+        };
+        assert!(stack.root_commit_id().is_none());
     }
 
     #[test]

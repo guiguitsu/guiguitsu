@@ -85,6 +85,18 @@ pub fn rebase_merge_commit(repo_path: &Path, merge_sha: &str, parents: &[String]
     run_jj(repo_path, &["log", "-r", &change_id, "--no-graph", "-T", "commit_id"])
 }
 
+/// Rebase the merge commit and all its descendants onto the given parents.
+/// Uses `jj rebase -s` (source) so descendants are also rebased.
+pub fn rebase_source(repo_path: &Path, revision: &str, parents: &[String]) -> Result<()> {
+    let mut args = vec!["rebase", "-s", revision];
+    for parent in parents {
+        args.push("-d");
+        args.push(parent.as_str());
+    }
+    run_jj(repo_path, &args)?;
+    Ok(())
+}
+
 pub fn abandon_commit(repo_path: &Path, sha: &str) -> Result<()> {
     run_jj(repo_path, &["abandon", sha, "--ignore-immutable"])?;
     Ok(())
@@ -92,9 +104,30 @@ pub fn abandon_commit(repo_path: &Path, sha: &str) -> Result<()> {
 
 /// Move the working copy to a new empty commit on top of `sha`.
 /// Returns the SHA of the newly created commit.
-pub fn new_at(repo_path: &Path, sha: &str) -> Result<String> {
-    run_jj(repo_path, &["new", sha])?;
+/// Move the working copy to a new empty commit on top of `revision`.
+/// Returns the SHA of the newly created commit.
+pub fn new_at(repo_path: &Path, revision: &str) -> Result<String> {
+    run_jj(repo_path, &["new", revision])?;
     run_jj(repo_path, &["log", "-r", "@", "--no-graph", "-T", "commit_id"])
+}
+
+/// Move the working copy to a new empty commit on top of `revision`.
+/// Does not look up the new commit's SHA.
+pub fn new_only(repo_path: &Path, revision: &str) -> Result<()> {
+    run_jj(repo_path, &["new", revision])?;
+    Ok(())
+}
+
+/// Returns the output of `jj resolve --list`, or empty string if no conflicts.
+pub fn resolve_list(repo_path: &Path) -> Result<String> {
+    match run_jj(repo_path, &["resolve", "--list", "--color=always"]) {
+        Ok(output) => Ok(output),
+        Err(_) => Ok(String::new()),
+    }
+}
+
+pub fn status(repo_path: &Path) -> Result<String> {
+    run_jj(repo_path, &["status", "--color=always"])
 }
 
 pub fn create_bookmark(repo_path: &Path, name: &str, revision: &str) -> Result<()> {
