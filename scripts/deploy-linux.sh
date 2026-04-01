@@ -5,6 +5,17 @@ set -e
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR"/..
 
-cargo build --release
+DEBUG=0
+for arg in "$@"; do
+    case "$arg" in
+        --debug) DEBUG=1 ;;
+    esac
+done
 
-cp target/release/guiguitsu /pub_data/installation/bin
+if [[ $DEBUG -eq 1 ]]; then
+    cargo build
+    cp target/debug/guiguitsu /pub_data/installation/bin
+else
+    cargo build --release
+    cp target/release/guiguitsu /pub_data/installation/bin
+fi

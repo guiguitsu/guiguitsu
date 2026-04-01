@@ -156,6 +156,12 @@ pub fn merge_base(repo_path: &Path, a: &str, b: &str) -> Result<String> {
     run_git(repo_path, &["merge-base", a, b])
 }
 
+pub fn git_push(repo_path: &Path, remote: &str, sha: &str, branch_name: &str) -> Result<()> {
+    let refspec = format!("{sha}:refs/heads/{branch_name}");
+    run_git(repo_path, &["push", "--force-with-lease", remote, &refspec])?;
+    Ok(())
+}
+
 pub fn create_branch(repo_path: &Path, branch: &str, start_point: &str) -> Result<()> {
     run_git(repo_path, &["branch", branch, start_point])?;
     Ok(())

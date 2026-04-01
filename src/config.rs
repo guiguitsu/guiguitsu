@@ -11,6 +11,10 @@ pub const FILE_NAME: &str = ".guiguitsu.json";
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StackEntry {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_branch: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -53,7 +57,29 @@ impl Config {
     }
 
     pub fn validate(&self, repo_path: &Path) -> Result<()> {
-        git_utils::ensure_remote_exists(repo_path, &self.workspace_remote)
+        git_utils::ensure_remote_exists(repo_path, &self.workspace_remote)?;
+
+        for entry in &self.stacks {
+            let is_trunk = entry.name == self.trunk;
+            if !is_trunk {
+                if entry.local_branch.is_none() {
+                    bail!("stack '{}' is missing required field 'local_branch'", entry.name);
+                }
+            }
+            if entry.remote_branch.is_none() {
+                bail!("stack '{}' is missing required field 'remote_branch'", entry.name);
+            }
+            if let Some(ref rb) = entry.remote_branch {
+                if !rb.contains('@') {
+                    bail!(
+                        "stack '{}': remote_branch '{}' must be in the format 'branch@remote'",
+                        entry.name, rb
+                    );
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub fn base_ref(&self) -> String {

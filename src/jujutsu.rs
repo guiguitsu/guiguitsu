@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::path::Path;
 
@@ -7,6 +8,16 @@ use crate::git_utils::run_command;
 
 fn run_jj(repo_path: &Path, args: &[&str]) -> Result<String> {
     run_command("jj", args, Some(repo_path))
+}
+
+/// Returns the operation ID of the most recent jj operation.
+pub fn current_op_id(repo_path: &Path) -> Result<String> {
+    let output = run_jj(repo_path, &["op", "log", "-n", "1", "--no-graph", "-T", "self.id()"])?;
+    let id = output.trim().to_string();
+    if id.is_empty() {
+        bail!("jj op log returned empty output");
+    }
+    Ok(id)
 }
 
 /// Returns true if the string looks like a jj change-id (all lowercase letters, no digits,
@@ -25,6 +36,15 @@ pub fn to_sha1(repo_path: &Path, rev: &str) -> Result<String> {
         run_jj(repo_path, &["show", "-T", "commit_id", "--no-patch", rev])
     } else {
         Ok(rev.to_string())
+    }
+}
+
+/// Converts a git SHA-1 to a jj change-id. If it's already a change-id, returns it as-is.
+pub fn to_change_id(repo_path: &Path, rev: &str) -> Result<String> {
+    if is_change_id(rev) {
+        Ok(rev.to_string())
+    } else {
+        run_jj(repo_path, &["show", "-T", "change_id", "--no-patch", rev])
     }
 }
 
@@ -88,7 +108,19 @@ pub fn rebase_merge_commit(repo_path: &Path, merge_sha: &str, parents: &[String]
 /// Rebase the merge commit and all its descendants onto the given parents.
 /// Uses `jj rebase -s` (source) so descendants are also rebased.
 pub fn rebase_source(repo_path: &Path, revision: &str, parents: &[String]) -> Result<()> {
-    let mut args = vec!["rebase", "-s", revision];
+    rebase_source_impl(repo_path, revision, parents, false)
+}
+
+pub fn rebase_source_ignore_immutable(repo_path: &Path, revision: &str, parents: &[String]) -> Result<()> {
+    rebase_source_impl(repo_path, revision, parents, true)
+}
+
+fn rebase_source_impl(repo_path: &Path, revision: &str, parents: &[String], ignore_immutable: bool) -> Result<()> {
+    let mut args = vec!["rebase"];
+    if ignore_immutable {
+        args.push("--ignore-immutable");
+    }
+    args.extend_from_slice(&["-s", revision]);
     for parent in parents {
         args.push("-d");
         args.push(parent.as_str());
@@ -160,6 +192,59 @@ pub fn rebase_after(repo_path: &Path, revision: &str, target: &str) -> Result<()
     Ok(())
 }
 
+/// Returns a list of bookmark names.
+/// If `remote` is true, returns remote bookmarks; otherwise returns local bookmarks.
+pub fn list_bookmarks(repo_path: &Path, remote: bool) -> Result<Vec<String>> {
+    let template = if remote { "remote_bookmarks" } else { "local_bookmarks" };
+    let output = run_jj(
+        repo_path,
+        &["log", "-r", "bookmarks()", "--no-graph", "-T", &format!("{template} ++ \"\\n\"")],
+    )?;
+    let bookmarks: Vec<String> = output
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty() && !line.ends_with("@git"))
+        .collect();
+    Ok(bookmarks)
+}
+
+/// Returns a map from commit SHA to bookmark names (local and/or remote).
+pub fn bookmarks_by_commit(repo_path: &Path) -> Result<HashMap<String, Vec<String>>> {
+    let template = r#"commit_id ++ "\t" ++ local_bookmarks ++ " " ++ remote_bookmarks ++ "\n""#;
+    let output = run_jj(
+        repo_path,
+        &["log", "-r", "bookmarks()", "--no-graph", "-T", template],
+    )?;
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+    for line in output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (sha, rest) = line.split_once('\t').unwrap_or((line, ""));
+        let names: Vec<String> = rest
+            .split_whitespace()
+            .filter(|s| !s.is_empty() && !s.ends_with("@git"))
+            .map(|s| s.to_string())
+            .collect();
+        if !names.is_empty() {
+            map.entry(sha.to_string()).or_default().extend(names);
+        }
+    }
+    Ok(map)
+}
+
+/// Resolves a bookmark name to its jj change-id.
+pub fn bookmark_to_change_id(repo_path: &Path, bookmark: &str) -> Result<String> {
+    run_jj(repo_path, &["log", "-r", bookmark, "--no-graph", "-T", "change_id"])
+}
+
+/// Push a bookmark to its remote via `jj git push`.
+pub fn git_push_bookmark(repo_path: &Path, bookmark: &str, remote: &str) -> Result<()> {
+    run_jj(repo_path, &["git", "push", "--bookmark", bookmark, "--remote", remote])?;
+    Ok(())
+}
+
 pub fn absorb(repo_path: &Path, paths: &[&str]) -> Result<()> {
     let mut args = vec!["absorb"];
     args.extend_from_slice(paths);
@@ -175,7 +260,7 @@ mod tests {
 
     use anyhow::{Context, Result, anyhow};
 
-    use super::{abandon_commit, create_bookmark, new_at};
+    use super::{abandon_commit, bookmark_to_change_id, bookmarks_by_commit, create_bookmark, list_bookmarks, new_at};
     use crate::git_utils::{find_commit_by_description, parent_shas, run_command};
 
     struct TempRepo {
@@ -258,6 +343,104 @@ mod tests {
 
         let branch_sha = run_command("git", &["rev-parse", "my-feature"], Some(&repo.path))?;
         assert_eq!(branch_sha, new_sha);
+
+        Ok(())
+    }
+
+    struct TempBookmarkRepo {
+        path: PathBuf,
+    }
+
+    impl TempBookmarkRepo {
+        fn create() -> Result<Self> {
+            let mut path = std::env::temp_dir();
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .context("time went backwards")?
+                .as_nanos();
+            path.push(format!("guiguitsu-jj-bookmark-test-{now}-{}", std::process::id()));
+
+            let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/repos/test_bookmarks.sh");
+            let output = Command::new("bash")
+                .arg(script)
+                .arg(&path)
+                .output()
+                .context("failed to execute test_bookmarks.sh")?;
+
+            if !output.status.success() {
+                return Err(anyhow!(
+                    "test_bookmarks.sh failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+
+            Ok(Self { path })
+        }
+    }
+
+    impl Drop for TempBookmarkRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn list_local_bookmarks_returns_created_bookmarks() -> Result<()> {
+        let repo = TempBookmarkRepo::create()?;
+
+        let bookmarks = list_bookmarks(&repo.path, false)?;
+
+        assert!(bookmarks.iter().any(|b| b.contains("feature-a")), "expected feature-a in {bookmarks:?}");
+        assert!(bookmarks.iter().any(|b| b.contains("feature-b")), "expected feature-b in {bookmarks:?}");
+        assert!(bookmarks.iter().any(|b| b.contains("feature-c")), "expected feature-c in {bookmarks:?}");
+        assert!(bookmarks.iter().any(|b| b.contains("main")), "expected main in {bookmarks:?}");
+
+        Ok(())
+    }
+
+    #[test]
+    fn list_remote_bookmarks_excludes_git_tracking_bookmarks() -> Result<()> {
+        let repo = TempBookmarkRepo::create()?;
+
+        // Colocated jj repos only have @git tracking bookmarks, which should be filtered out.
+        let bookmarks = list_bookmarks(&repo.path, true)?;
+        assert!(
+            bookmarks.iter().all(|b| !b.ends_with("@git")),
+            "expected no @git bookmarks, got {bookmarks:?}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn bookmarks_by_commit_maps_shas_to_names() -> Result<()> {
+        let repo = TempBookmarkRepo::create()?;
+
+        let map = bookmarks_by_commit(&repo.path)?;
+
+        // At least one commit should have a bookmark containing "feature-a".
+        let has_feature_a = map.values().any(|names| names.iter().any(|n| n.contains("feature-a")));
+        assert!(has_feature_a, "expected a commit with feature-a bookmark in {map:?}");
+
+        // The main bookmark should also appear.
+        let has_main = map.values().any(|names| names.iter().any(|n| n == "main"));
+        assert!(has_main, "expected a commit with main bookmark in {map:?}");
+
+        Ok(())
+    }
+
+    #[test]
+    fn bookmark_to_change_id_resolves_bookmark() -> Result<()> {
+        let repo = TempBookmarkRepo::create()?;
+
+        let change_id = bookmark_to_change_id(&repo.path, "feature-a")?;
+        assert!(!change_id.is_empty(), "expected non-empty change-id for feature-a");
+
+        // The change-id should be all lowercase letters (jj change-id format).
+        assert!(
+            change_id.chars().all(|c| c.is_ascii_lowercase()),
+            "expected all lowercase letters in change-id, got: {change_id}"
+        );
 
         Ok(())
     }

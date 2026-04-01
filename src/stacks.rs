@@ -31,27 +31,34 @@ pub struct GitStackProvider {
     /// Ordered stack names from config — each index corresponds to the same
     /// index in the merge commit's parent list.
     config_stacks: Vec<String>,
+    /// Optional merge commit ref from config (change-id or SHA).
+    merge_commit_ref: Option<String>,
 }
 
 impl GitStackProvider {
-    pub fn new(repo_path: PathBuf, trunk_name: String, config_stacks: Vec<String>) -> Self {
-        Self { repo_path, trunk_name, config_stacks }
+    pub fn new(repo_path: PathBuf, trunk_name: String, config_stacks: Vec<String>, merge_commit_ref: Option<String>) -> Self {
+        Self { repo_path, trunk_name, config_stacks, merge_commit_ref }
     }
 }
 
 impl StackProvider for GitStackProvider {
     fn get_stacks(&self) -> Result<Vec<StackInfo>> {
-        let head_sha = current_head_sha(&self.repo_path)?;
-
-        let mut sha = head_sha;
-        let git_parents = loop {
-            let parents = parent_shas(&self.repo_path, &sha)?;
-            if parents.len() >= 2 {
-                break parents;
-            }
-            match parents.into_iter().next() {
-                Some(p) => sha = p,
-                None => return Ok(vec![]),
+        let git_parents = if let Some(ref merge_ref) = self.merge_commit_ref {
+            let merge_sha = crate::jujutsu::to_sha1(&self.repo_path, merge_ref)?;
+            parent_shas(&self.repo_path, &merge_sha)?
+        } else {
+            // Fallback: walk from HEAD to find the first merge commit.
+            let head_sha = current_head_sha(&self.repo_path)?;
+            let mut sha = head_sha;
+            loop {
+                let parents = parent_shas(&self.repo_path, &sha)?;
+                if parents.len() >= 2 {
+                    break parents;
+                }
+                match parents.into_iter().next() {
+                    Some(p) => sha = p,
+                    None => return Ok(vec![]),
+                }
             }
         };
 
@@ -80,7 +87,12 @@ impl StackProvider for GitStackProvider {
                 });
             } else {
                 let base = merge_base(&self.repo_path, trunk_sha, parent_sha)?;
-                let commits = commits_in_range(&self.repo_path, trunk_sha, parent_sha)?;
+                let mut commits = commits_in_range(&self.repo_path, trunk_sha, parent_sha)?;
+                for commit in &mut commits {
+                    if let Ok(cid) = crate::jujutsu::to_change_id(&self.repo_path, &commit.commit_id) {
+                        commit.change_id = cid;
+                    }
+                }
                 stacks.push(StackInfo {
                     name: name.clone(),
                     commits,
@@ -144,7 +156,7 @@ mod tests {
     fn get_stacks_returns_workspace_and_trunk_from_repo1() -> Result<()> {
         let repo = TempRepo::create()?;
         // repo1 has 2 merge parents (workspace + main), so 0 extra stack entries
-        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string(), vec!["workspace".to_string(), "main".to_string()]);
+        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string(), vec!["workspace".to_string(), "main".to_string()], None);
 
         let stacks = provider.get_stacks()?;
 
@@ -155,7 +167,7 @@ mod tests {
     #[test]
     fn get_stacks_returns_correct_stack_names_from_repo1() -> Result<()> {
         let repo = TempRepo::create()?;
-        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string(), vec!["workspace".to_string(), "main".to_string()]);
+        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string(), vec!["workspace".to_string(), "main".to_string()], None);
 
         let stacks = provider.get_stacks()?;
 
@@ -167,7 +179,7 @@ mod tests {
     #[test]
     fn base_commit_id_is_fork_point() -> Result<()> {
         let repo = TempRepo::create()?;
-        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string(), vec!["workspace".to_string(), "main".to_string()]);
+        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string(), vec!["workspace".to_string(), "main".to_string()], None);
 
         let stacks = provider.get_stacks()?;
         let stack = &stacks[0];
@@ -186,7 +198,7 @@ mod tests {
     #[test]
     fn head_commit_id_is_first_commit_in_stack() -> Result<()> {
         let repo = TempRepo::create()?;
-        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string(), vec!["workspace".to_string(), "main".to_string()]);
+        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string(), vec!["workspace".to_string(), "main".to_string()], None);
 
         let stacks = provider.get_stacks()?;
         let stack = &stacks[0];
@@ -209,7 +221,7 @@ mod tests {
     #[test]
     fn root_commit_id_is_last_commit_in_stack() -> Result<()> {
         let repo = TempRepo::create()?;
-        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string(), vec!["workspace".to_string(), "main".to_string()]);
+        let provider = GitStackProvider::new(repo.path.clone(), "main".to_string(), vec!["workspace".to_string(), "main".to_string()], None);
 
         let stacks = provider.get_stacks()?;
         let stack = &stacks[0];
@@ -237,6 +249,7 @@ mod tests {
             repo.path.clone(),
             "main".to_string(),
             vec!["workspace".to_string(), "main".to_string(), "extra".to_string()],
+            None,
         );
 
         match provider.get_stacks() {

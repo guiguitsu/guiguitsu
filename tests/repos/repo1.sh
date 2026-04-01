@@ -101,8 +101,8 @@ cat <<'CONF' > .guiguitsu.json
   "workspace_remote": "origin",
   "trunk": "main",
   "stacks": [
-    { "name": "workspace" },
-    { "name": "main" }
+    { "name": "workspace", "local_branch": "workspace", "remote_branch": "workspace@origin" },
+    { "name": "main", "remote_branch": "main@origin" }
   ]
 }
 CONF
@@ -121,8 +121,8 @@ cat <<'CONF' > .guiguitsu.json
   "workspace_remote": "origin",
   "trunk": "main",
   "stacks": [
-    { "name": "workspace" },
-    { "name": "main" }
+    { "name": "workspace", "local_branch": "workspace", "remote_branch": "workspace@origin" },
+    { "name": "main", "remote_branch": "main@origin" }
   ]
 }
 CONF
