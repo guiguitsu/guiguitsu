@@ -704,17 +704,17 @@ fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
     }
     // Print unstacked commits (descendants of the merge commit).
     if let Some(ref merge_ref) = config.merge_commit {
-        let merge_sha = jujutsu::to_sha1(&repo_path, merge_ref)?;
-        let mut unstacked = git_utils::descendants_of(&repo_path, &merge_sha)?;
-        for commit in &mut unstacked {
-            if let Ok(cid) = jujutsu::to_change_id(&repo_path, &commit.commit_id) {
-                commit.change_id = cid;
-            }
-        }
+        const ORANGE: &str = "\x1b[38;5;208m";
+        let unstacked = jujutsu::descendants_of(&repo_path, merge_ref)?;
         if !unstacked.is_empty() {
             println!("{CYAN}Unstacked{RESET}");
             for commit in &unstacked {
-                println!("  {DIM}{} / {}{RESET} {}", &commit.change_id[..8.min(commit.change_id.len())], &commit.commit_id[..8.min(commit.commit_id.len())], commit.description);
+                let empty_suffix = if jujutsu::is_empty_commit(&repo_path, &commit.commit_id).unwrap_or(false) {
+                    format!(" {ORANGE}(empty){RESET}")
+                } else {
+                    String::new()
+                };
+                println!("  {DIM}{} / {}{RESET} {}{empty_suffix}", &commit.change_id[..8.min(commit.change_id.len())], &commit.commit_id[..8.min(commit.commit_id.len())], commit.description);
             }
         }
     }

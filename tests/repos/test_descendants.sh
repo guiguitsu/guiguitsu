@@ -31,40 +31,39 @@ echo "main commit 2" >> main.txt
 git add main.txt
 git commit -m "main commit 2"
 
-# Create workspace branch with a commit
-git checkout -b workspace
-echo "workspace file" > workspace.txt
-git add workspace.txt
-git commit -m "workspace commit 1"
+# Initialize jj colocated repo
+jj git init --colocate
 
-workspace_sha=$(git rev-parse HEAD)
+# Create workspace branch with a commit
+jj new main
+echo "workspace file" > workspace.txt
+jj desc -m "workspace commit 1"
+jj bookmark create workspace -r @
+
+workspace_sha=$(git rev-parse workspace)
 main_sha=$(git rev-parse main)
 
-# Create a merge commit with workspace and main as parents
-merge_sha=$(git commit-tree "$(git rev-parse HEAD^{tree})" \
-	-p "$workspace_sha" -p "$main_sha" \
-	-m "Special workspace merge commit")
+# Create the merge commit (workspace + main)
+jj new -m "Special workspace merge commit" "$workspace_sha" "$main_sha"
+merge_change_id=$(jj log -r @ --no-graph -T 'change_id')
 
-# Create a child commit on top of the merge
-child_sha=$(git commit-tree "$(git rev-parse HEAD^{tree})" \
-	-p "$merge_sha" \
-	-m "unstacked child commit")
+# Create a child on top of the merge
+jj new -m "unstacked child commit"
+child_change_id=$(jj log -r @ --no-graph -T 'change_id')
 
-# Create a grandchild commit on top of the child
-grandchild_sha=$(git commit-tree "$(git rev-parse HEAD^{tree})" \
-	-p "$child_sha" \
-	-m "unstacked grandchild commit")
+# Create a grandchild on top of the child
+jj new -m "unstacked grandchild commit"
+grandchild_change_id=$(jj log -r @ --no-graph -T 'change_id')
 
-# Point a branch at the grandchild so all commits are reachable
-git checkout --detach "$grandchild_sha"
-
-# Write guiguitsu config with merge_commit set
+# Write guiguitsu config with merge_commit set (using change-id).
+# This must happen before resolving final SHAs because writing a file
+# triggers a jj snapshot that rewrites the working-copy commit.
 cat <<CONF > .guiguitsu.json
 {
   "workspace_branch": "workspace",
   "workspace_remote": "origin",
   "trunk": "main",
-  "merge_commit": "$merge_sha",
+  "merge_commit": "$merge_change_id",
   "stacks": [
     { "name": "workspace", "local_branch": "workspace", "remote_branch": "workspace@origin" },
     { "name": "main", "remote_branch": "main@origin" }
@@ -72,7 +71,13 @@ cat <<CONF > .guiguitsu.json
 }
 CONF
 
-# Export SHAs for tests to verify against
+# Force a snapshot so jj incorporates the config file change,
+# then resolve the final commit SHAs via their stable change-ids.
+merge_sha=$(jj log -r "$merge_change_id" --no-graph -T 'commit_id')
+child_sha=$(jj log -r "$child_change_id" --no-graph -T 'commit_id')
+grandchild_sha=$(jj log -r "$grandchild_change_id" --no-graph -T 'commit_id')
+
 echo "$merge_sha" > .merge_sha
+echo "$merge_change_id" > .merge_change_id
 echo "$child_sha" > .child_sha
 echo "$grandchild_sha" > .grandchild_sha

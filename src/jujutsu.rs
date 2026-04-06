@@ -245,6 +245,51 @@ pub fn git_push_bookmark(repo_path: &Path, bookmark: &str, remote: &str) -> Resu
     Ok(())
 }
 
+/// Returns true if the given revision is an empty commit (no file changes).
+pub fn is_empty_commit(repo_path: &Path, rev: &str) -> Result<bool> {
+    let output = run_jj(
+        repo_path,
+        &["log", "-r", rev, "--no-graph", "-T", r#"if(self.empty(), "empty", "not empty")"#],
+    )?;
+    Ok(output.trim() == "empty")
+}
+
+/// Returns all descendants of `rev` (excluding `rev` itself) as `CommitInfo` structs.
+/// Uses `jj log` with the `rev::` revset to find descendants reliably.
+pub fn descendants_of(repo_path: &Path, rev: &str) -> Result<Vec<crate::git_utils::CommitInfo>> {
+    let revset = format!("{rev}::");
+    let template = r#"commit_id ++ "\x1f" ++ change_id ++ "\x1f" ++ description.first_line() ++ "\n""#;
+    let output = run_jj(repo_path, &["log", "-r", &revset, "--no-graph", "-T", template])?;
+
+    let rev_sha = to_sha1(repo_path, rev)?;
+
+    let mut result = Vec::new();
+    for line in output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut fields = line.splitn(3, '\x1f');
+        let commit_id = fields.next().unwrap_or("").to_string();
+        let change_id = fields.next().unwrap_or("").to_string();
+        let description = fields.next().unwrap_or("").to_string();
+        // Skip the starting commit itself.
+        if commit_id == rev_sha {
+            continue;
+        }
+        result.push(crate::git_utils::CommitInfo {
+            change_id,
+            commit_id,
+            description,
+            author: String::new(),
+            timestamp: String::new(),
+            changed_files: Vec::new(),
+        });
+    }
+
+    Ok(result)
+}
+
 pub fn absorb(repo_path: &Path, paths: &[&str]) -> Result<()> {
     let mut args = vec!["absorb"];
     args.extend_from_slice(paths);
@@ -260,7 +305,9 @@ mod tests {
 
     use anyhow::{Context, Result, anyhow};
 
-    use super::{abandon_commit, bookmark_to_change_id, bookmarks_by_commit, create_bookmark, list_bookmarks, new_at};
+    use std::fs;
+
+    use super::{abandon_commit, bookmark_to_change_id, bookmarks_by_commit, create_bookmark, descendants_of, is_empty_commit, list_bookmarks, new_at};
     use crate::git_utils::{find_commit_by_description, parent_shas, run_command};
 
     struct TempRepo {
@@ -442,6 +489,126 @@ mod tests {
             "expected all lowercase letters in change-id, got: {change_id}"
         );
 
+        Ok(())
+    }
+
+    struct TempDescendantsRepo {
+        path: PathBuf,
+    }
+
+    impl TempDescendantsRepo {
+        fn create() -> Result<Self> {
+            let mut path = std::env::temp_dir();
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .context("time went backwards")?
+                .as_nanos();
+            path.push(format!("guiguitsu-jj-descendants-test-{now}-{}", std::process::id()));
+
+            let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/repos/test_descendants.sh");
+            let output = Command::new("bash")
+                .arg(script)
+                .arg(&path)
+                .output()
+                .context("failed to execute test_descendants.sh")?;
+
+            if !output.status.success() {
+                return Err(anyhow!(
+                    "test_descendants.sh failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+
+            Ok(Self { path })
+        }
+    }
+
+    impl Drop for TempDescendantsRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn descendants_of_returns_children_and_grandchildren() -> Result<()> {
+        let repo = TempDescendantsRepo::create()?;
+
+        let merge_change_id = fs::read_to_string(repo.path.join(".merge_change_id"))?.trim().to_string();
+
+        let descendants = descendants_of(&repo.path, &merge_change_id)?;
+
+        // Expect 2 descendants: the child and grandchild commits.
+        assert_eq!(descendants.len(), 2, "expected 2 descendants, got: {descendants:?}");
+        assert!(
+            descendants.iter().any(|c| c.description == "unstacked child commit"),
+            "child should be a descendant"
+        );
+        assert!(
+            descendants.iter().any(|c| c.description == "unstacked grandchild commit"),
+            "grandchild should be a descendant"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn descendants_of_returns_empty_at_tip() -> Result<()> {
+        let repo = TempDescendantsRepo::create()?;
+
+        let merge_change_id = fs::read_to_string(repo.path.join(".merge_change_id"))?.trim().to_string();
+        let descendants = descendants_of(&repo.path, &merge_change_id)?;
+
+        // The grandchild is the last real commit; get its change-id from the results.
+        let grandchild = descendants.iter()
+            .find(|c| c.description == "unstacked grandchild commit")
+            .expect("grandchild should exist");
+
+        let tip_descendants = descendants_of(&repo.path, &grandchild.change_id)?;
+        assert!(tip_descendants.is_empty(), "tip commit should have no descendants");
+        Ok(())
+    }
+
+    #[test]
+    fn descendants_of_excludes_merge_commit_itself() -> Result<()> {
+        let repo = TempDescendantsRepo::create()?;
+
+        let merge_change_id = fs::read_to_string(repo.path.join(".merge_change_id"))?.trim().to_string();
+
+        let descendants = descendants_of(&repo.path, &merge_change_id)?;
+
+        assert!(
+            !descendants.iter().any(|c| c.description == "Special workspace merge commit"),
+            "merge commit itself should not appear in descendants"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn is_empty_commit_returns_true_for_empty() -> Result<()> {
+        let repo = TempDescendantsRepo::create()?;
+
+        let merge_change_id = fs::read_to_string(repo.path.join(".merge_change_id"))?.trim().to_string();
+
+        // Create an empty commit on top of the merge.
+        let empty_sha = new_at(&repo.path, &merge_change_id)?;
+
+        assert!(is_empty_commit(&repo.path, &empty_sha)?, "commit created with jj new should be empty");
+        Ok(())
+    }
+
+    #[test]
+    fn is_empty_commit_returns_false_for_non_empty() -> Result<()> {
+        let repo = TempDescendantsRepo::create()?;
+
+        let merge_change_id = fs::read_to_string(repo.path.join(".merge_change_id"))?.trim().to_string();
+
+        // Create a commit on top of the merge and add a file to make it non-empty.
+        new_at(&repo.path, &merge_change_id)?;
+        fs::write(repo.path.join("new_file.txt"), "content")?;
+        // jj auto-snapshots on next command, rewriting @ with the new file.
+        // Use @ to refer to the current working copy after snapshot.
+        assert!(!is_empty_commit(&repo.path, "@")?, "commit with a new file should not be empty");
         Ok(())
     }
 }
