@@ -203,7 +203,8 @@ pub fn is_merge_commit(repo_path: &Path, commit_sha: &str) -> Result<bool> {
 pub fn children_of(repo_path: &Path, commit_sha: &str, range: &[&str]) -> Result<Vec<String>> {
     let mut args = vec!["rev-list", "--parents"];
     if range.is_empty() {
-        args.push("--all");
+        // Exclude jj internal refs to avoid seeing abandoned operation snapshots.
+        args.extend_from_slice(&["--exclude=refs/jj/*", "--all"]);
     } else {
         args.extend_from_slice(range);
     }
@@ -222,6 +223,41 @@ pub fn children_of(repo_path: &Path, commit_sha: &str, range: &[&str]) -> Result
         }
     }
     Ok(children)
+}
+
+/// Returns all descendants of `commit_sha` (children, grandchildren, etc.)
+/// as `CommitInfo` structs, in BFS order (closest descendants first).
+pub fn descendants_of(repo_path: &Path, commit_sha: &str) -> Result<Vec<CommitInfo>> {
+    let mut result = Vec::new();
+    let mut queue = std::collections::VecDeque::new();
+    let mut visited = std::collections::HashSet::new();
+
+    queue.push_back(commit_sha.to_string());
+    visited.insert(commit_sha.to_string());
+
+    while let Some(current) = queue.pop_front() {
+        let kids = children_of(repo_path, &current, &[])?;
+        for kid in kids {
+            if visited.insert(kid.clone()) {
+                let info = run_git(repo_path, &["log", "-1", "--format=%an\x1f%ai\x1f%s", &kid])?;
+                let mut fields = info.splitn(3, '\x1f');
+                let author = fields.next().unwrap_or("").to_string();
+                let timestamp = fields.next().unwrap_or("").to_string();
+                let description = fields.next().unwrap_or("").to_string();
+                result.push(CommitInfo {
+                    change_id: kid.clone(),
+                    commit_id: kid.clone(),
+                    description,
+                    author,
+                    timestamp,
+                    changed_files: Vec::new(),
+                });
+                queue.push_back(kid);
+            }
+        }
+    }
+
+    Ok(result)
 }
 
 /// Walks forward from `commit_sha` through its children until a merge commit
@@ -464,7 +500,7 @@ mod tests {
     use anyhow::{Context, Result, anyhow};
 
     use crate::config::Config;
-    use super::{child_merge_commit, children_of, commits_in_range, create_branch, current_head_sha, find_commit_by_description, find_existing_workspace_merge, has_staged_changed, is_merge_commit, parent_shas, run_command, run_git, validate_startup_requirements};
+    use super::{child_merge_commit, children_of, commits_in_range, create_branch, current_head_sha, descendants_of, find_commit_by_description, find_existing_workspace_merge, has_staged_changed, is_merge_commit, parent_shas, run_command, run_git, validate_startup_requirements};
 
     struct TempRepo {
         path: PathBuf,
@@ -793,6 +829,37 @@ mod tests {
         let result = find_existing_workspace_merge(&repo.path, "workspace", "main")?;
         assert!(result.is_none(), "should not find merge when none exists");
 
+        Ok(())
+    }
+
+    #[test]
+    fn descendants_of_returns_children_and_grandchildren() -> Result<()> {
+        let repo = TempRepo::create_from("test_descendants.sh")?;
+
+        let merge_sha = fs::read_to_string(repo.path.join(".merge_sha"))?.trim().to_string();
+        let child_sha = fs::read_to_string(repo.path.join(".child_sha"))?.trim().to_string();
+        let grandchild_sha = fs::read_to_string(repo.path.join(".grandchild_sha"))?.trim().to_string();
+
+        let descendants = descendants_of(&repo.path, &merge_sha)?;
+        let shas: Vec<&str> = descendants.iter().map(|c| c.commit_id.as_str()).collect();
+
+        assert_eq!(shas.len(), 2, "expected 2 descendants, got: {shas:?}");
+        assert!(shas.contains(&child_sha.as_str()), "child should be a descendant");
+        assert!(shas.contains(&grandchild_sha.as_str()), "grandchild should be a descendant");
+        // The merge commit itself should NOT appear.
+        assert!(!shas.contains(&merge_sha.as_str()), "starting commit should not be in descendants");
+
+        Ok(())
+    }
+
+    #[test]
+    fn descendants_of_returns_empty_at_tip() -> Result<()> {
+        let repo = TempRepo::create_from("test_descendants.sh")?;
+
+        let grandchild_sha = fs::read_to_string(repo.path.join(".grandchild_sha"))?.trim().to_string();
+        let descendants = descendants_of(&repo.path, &grandchild_sha)?;
+
+        assert!(descendants.is_empty(), "tip commit should have no descendants");
         Ok(())
     }
 

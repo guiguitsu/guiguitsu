@@ -698,10 +698,27 @@ fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
                 } else {
                     String::new()
                 };
-                println!("  {} {}{bookmark_suffix}", &commit.change_id[..8.min(commit.change_id.len())], commit.description);
+                println!("  {DIM}{} / {}{RESET} {}{bookmark_suffix}", &commit.change_id[..8.min(commit.change_id.len())], &commit.commit_id[..8.min(commit.commit_id.len())], commit.description);
             }
         }
     }
+    // Print unstacked commits (descendants of the merge commit).
+    if let Some(ref merge_ref) = config.merge_commit {
+        let merge_sha = jujutsu::to_sha1(&repo_path, merge_ref)?;
+        let mut unstacked = git_utils::descendants_of(&repo_path, &merge_sha)?;
+        for commit in &mut unstacked {
+            if let Ok(cid) = jujutsu::to_change_id(&repo_path, &commit.commit_id) {
+                commit.change_id = cid;
+            }
+        }
+        if !unstacked.is_empty() {
+            println!("{CYAN}Unstacked{RESET}");
+            for commit in &unstacked {
+                println!("  {DIM}{} / {}{RESET} {}", &commit.change_id[..8.min(commit.change_id.len())], &commit.commit_id[..8.min(commit.commit_id.len())], commit.description);
+            }
+        }
+    }
+
     if needs_rebase {
         println!();
         println!("Rebase your stacks with \"gg rebase\"");
