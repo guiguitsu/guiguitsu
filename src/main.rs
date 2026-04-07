@@ -715,6 +715,18 @@ fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
                     String::new()
                 };
                 println!("  {DIM}{} / {}{RESET} {}{empty_suffix}", &commit.change_id[..8.min(commit.change_id.len())], &commit.commit_id[..8.min(commit.commit_id.len())], commit.description);
+                if let Ok(files_output) = git_utils::run_command(
+                    "git",
+                    &["diff-tree", "--no-commit-id", "--name-only", "-r", &commit.commit_id],
+                    Some(&repo_path),
+                ) {
+                    for file in files_output.lines() {
+                        let file = file.trim();
+                        if !file.is_empty() {
+                            println!("    {GREEN}{file}{RESET}");
+                        }
+                    }
+                }
             }
         }
     }
