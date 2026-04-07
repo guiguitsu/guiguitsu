@@ -4,11 +4,22 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-slint = "1.15.1"
+slint = { version = "1.15.1", optional = true }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 git2 = "0.19"
 
 [build-dependencies]
-slint-build = "1.15.1"
+slint-build = { version = "1.15.1", optional = true }
+
+[features]
+default = ["gui"]
+gui = ["dep:slint", "dep:slint-build"]
+
+[[bin]]
+name = "guiguitsu"
+required-features = ["gui"]
+
+[[bin]]
+name = "gg"

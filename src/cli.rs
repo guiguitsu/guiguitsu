@@ -1,46 +1,16 @@
-mod config;
-mod stacks;
-mod models;
-mod git_utils;
-mod jujutsu;
-
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
 use anyhow::{Context, Result, bail};
-use config::Config;
 
-slint::include_modules!();
+use crate::config::{self, Config};
+use crate::verbose;
+use crate::{git_utils, jujutsu, stacks};
 
-fn verbose() -> bool {
-    std::env::var("VERBOSE").as_deref() == Ok("1")
-}
-
-fn main() -> Result<()> {
-    match parse_command(std::env::args().skip(1).collect())? {
-        CliCommand::Help => {
-            print_help();
-            Ok(())
-        }
-        CliCommand::CreateConfig { repo_path, config, after_sha, merge_commit } => {
-            create_config(repo_path, config, after_sha, merge_commit)
-        }
-        CliCommand::Run { repo_path, print_merge_command, verbose } => run_app(repo_path, print_merge_command, verbose),
-        CliCommand::Stacks { repo_path, verbose } => print_stacks(repo_path, verbose),
-        CliCommand::ApplyBranch { repo_path, branch_name } => apply_branch(repo_path, branch_name),
-        CliCommand::RemoveStack { repo_path, stack_name } => remove_stack(repo_path, stack_name),
-        CliCommand::RereadStacks { repo_path } => reread_stacks(repo_path),
-        CliCommand::Rebase { repo_path } => rebase_stacks(repo_path),
-        CliCommand::Advance { repo_path, push, dry } => advance_bookmarks(repo_path, push, dry),
-        CliCommand::Move { repo_path, sha, after_commit } => move_commit(repo_path, sha, after_commit),
-    }
-}
-
-fn print_help() {
+pub fn print_help(bin_name: &str) {
     print!(
         "\
-Usage: guiguitsu [-C <path>] [OPTIONS] [<repo-path>]
-       guiguitsu [-C <path>] create-config [<repo-path>] --workspace-branch=<branch> [--workspace-remote=<remote>] [--trunk=<branch>] [-A <sha>]
+Usage: {bin} [-C <path>] [OPTIONS] [<repo-path>]
+       {bin} [-C <path>] create-config [<repo-path>] --workspace-branch=<branch> [--workspace-remote=<remote>] [--trunk=<branch>] [-A <sha>]
 
 Options:
   -C <path>                        Change to <path> before doing anything
@@ -69,11 +39,12 @@ Subcommands:
                                    --dry print what would be done without making changes
   move -r|-s <sha> <after_commit> [<path>]  Rebase <sha> after <after_commit>, then
                                    move the working copy onto the merge commit
-"
+",
+        bin = bin_name
     );
 }
 
-enum CliCommand {
+pub enum CliCommand {
     Help,
     CreateConfig {
         repo_path: PathBuf,
@@ -116,7 +87,7 @@ enum CliCommand {
     },
 }
 
-fn parse_command(args: Vec<String>) -> Result<CliCommand> {
+pub fn parse_command(args: Vec<String>) -> Result<CliCommand> {
     let mut args = args.as_slice();
 
     if args.first().map(String::as_str) == Some("-C") {
@@ -368,12 +339,57 @@ fn parse_run_command(args: &[String]) -> Result<CliCommand> {
     Ok(CliCommand::Run { repo_path, print_merge_command, verbose })
 }
 
-fn create_config(repo_path: PathBuf, mut config: Config, after_sha: Option<String>, merge_commit: Option<String>) -> Result<()> {
+/// Dispatch every command except `Run`. Returns `Ok(true)` if the command was
+/// handled here, or `Ok(false)` if the caller (a GUI binary) needs to handle
+/// `CliCommand::Run` itself.
+pub fn dispatch_non_gui(cmd: CliCommand) -> Result<bool> {
+    match cmd {
+        CliCommand::Help => {
+            // Default help text uses generic name; binaries that want a custom
+            // name should call print_help() themselves before dispatching.
+            print_help("guiguitsu");
+            Ok(true)
+        }
+        CliCommand::CreateConfig { repo_path, config, after_sha, merge_commit } => {
+            create_config(repo_path, config, after_sha, merge_commit)?;
+            Ok(true)
+        }
+        CliCommand::Stacks { repo_path, verbose } => {
+            print_stacks(repo_path, verbose)?;
+            Ok(true)
+        }
+        CliCommand::ApplyBranch { repo_path, branch_name } => {
+            apply_branch(repo_path, branch_name)?;
+            Ok(true)
+        }
+        CliCommand::RemoveStack { repo_path, stack_name } => {
+            remove_stack(repo_path, stack_name)?;
+            Ok(true)
+        }
+        CliCommand::RereadStacks { repo_path } => {
+            reread_stacks(repo_path)?;
+            Ok(true)
+        }
+        CliCommand::Rebase { repo_path } => {
+            rebase_stacks(repo_path)?;
+            Ok(true)
+        }
+        CliCommand::Advance { repo_path, push, dry } => {
+            advance_bookmarks(repo_path, push, dry)?;
+            Ok(true)
+        }
+        CliCommand::Move { repo_path, sha, after_commit } => {
+            move_commit(repo_path, sha, after_commit)?;
+            Ok(true)
+        }
+        CliCommand::Run { .. } => Ok(false),
+    }
+}
+
+pub fn create_config(repo_path: PathBuf, mut config: Config, after_sha: Option<String>, merge_commit: Option<String>) -> Result<()> {
     config.validate(&repo_path)?;
 
     if let Some(ref mc) = config.merge_commit {
-        // Resolve to SHA for the git parent_shas lookup, but keep the original
-        // ref (possibly a jj change-id) in the config as-is.
         let sha = jujutsu::to_sha1(&repo_path, mc)?;
         let git_parents = git_utils::parent_shas(&repo_path, &sha)?;
         for i in 2..git_parents.len() {
@@ -414,11 +430,10 @@ fn create_config(repo_path: PathBuf, mut config: Config, after_sha: Option<Strin
     Ok(())
 }
 
-fn apply_branch(repo_path: PathBuf, branch_name: String) -> Result<()> {
+pub fn apply_branch(repo_path: PathBuf, branch_name: String) -> Result<()> {
     git_utils::validate_startup_requirements(&repo_path)?;
     let mut config = Config::load(&repo_path)?;
 
-    // Find the merge commit before any jj new calls that would move HEAD away from it.
     let (merge_sha, mut parents) = git_utils::find_workspace_merge_commit(&repo_path)?;
 
     if !git_utils::local_branch_exists(&repo_path, &branch_name)? {
@@ -429,7 +444,6 @@ fn apply_branch(repo_path: PathBuf, branch_name: String) -> Result<()> {
     parents.push(branch_head);
 
     let new_merge_sha = jujutsu::rebase_merge_commit(&repo_path, &merge_sha, &parents)?;
-    // After rebase the working copy may have moved; park it back on top of the merge commit.
     jujutsu::new_at(&repo_path, &new_merge_sha)?;
 
     let stack_count = config.stacks.iter().filter(|s| s.name != "workspace" && s.name != config.trunk).count();
@@ -443,7 +457,7 @@ fn apply_branch(repo_path: PathBuf, branch_name: String) -> Result<()> {
     Ok(())
 }
 
-fn remove_stack(repo_path: PathBuf, stack_name: String) -> Result<()> {
+pub fn remove_stack(repo_path: PathBuf, stack_name: String) -> Result<()> {
     git_utils::validate_startup_requirements(&repo_path)?;
     let mut config = Config::load(&repo_path)?;
 
@@ -479,12 +493,11 @@ fn remove_stack(repo_path: PathBuf, stack_name: String) -> Result<()> {
     Ok(())
 }
 
-fn reread_stacks(repo_path: PathBuf) -> Result<()> {
+pub fn reread_stacks(repo_path: PathBuf) -> Result<()> {
     git_utils::validate_startup_requirements(&repo_path)?;
     let mut config = Config::load(&repo_path)?;
     let (_merge_sha, git_parents) = git_utils::find_workspace_merge_commit(&repo_path)?;
 
-    // git_parents[0] = workspace, [1] = trunk, [2..] = stacks
     let remote = &config.workspace_remote;
     let mut stacks = vec![
         config::StackEntry {
@@ -520,7 +533,7 @@ fn reread_stacks(repo_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn rebase_stacks(repo_path: PathBuf) -> Result<()> {
+pub fn rebase_stacks(repo_path: PathBuf) -> Result<()> {
     git_utils::validate_startup_requirements(&repo_path)?;
 
     let op_id = jujutsu::current_op_id(&repo_path)?;
@@ -542,12 +555,9 @@ fn rebase_stacks_inner(repo_path: &Path) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("no merge_commit in config; run with --print-stacks first or set it manually"))?
         .clone();
 
-    // Resolve to SHA for the git parent_shas lookup, but keep the original
-    // ref (possibly a jj change-id) so we pass it to `jj rebase -s` as-is.
     let merge_sha = jujutsu::to_sha1(repo_path, &merge_ref)?;
     let mut parents = git_utils::parent_shas(repo_path, &merge_sha)?;
 
-    // The trunk parent is at the index of the trunk entry in config.stacks.
     let trunk_index = config.stacks.iter().position(|s| s.name == config.trunk)
         .ok_or_else(|| anyhow::anyhow!("trunk '{}' not found in config stacks", config.trunk))?;
 
@@ -558,7 +568,6 @@ fn rebase_stacks_inner(repo_path: &Path) -> Result<()> {
         );
     }
 
-    // Use jj's trunk@remote syntax so jj resolves it directly.
     let trunk_remote_ref = format!("{}@{}", config.trunk, config.workspace_remote);
     parents[trunk_index] = trunk_remote_ref.clone();
 
@@ -568,8 +577,6 @@ fn rebase_stacks_inner(repo_path: &Path) -> Result<()> {
 
     println!("Rebased workspace merge commit onto {}", &trunk_remote_ref);
 
-    // Rebase each non-trunk stack's root onto trunk@remote so they pick up
-    // the latest trunk.
     {
         use stacks::StackProvider;
         let config_stacks: Vec<String> = config.stacks.iter().map(|s| s.name.clone()).collect();
@@ -596,7 +603,7 @@ fn rebase_stacks_inner(repo_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn advance_bookmarks(repo_path: PathBuf, push: bool, dry: bool) -> Result<()> {
+pub fn advance_bookmarks(repo_path: PathBuf, push: bool, dry: bool) -> Result<()> {
     use stacks::{GitStackProvider, StackProvider};
 
     git_utils::validate_startup_requirements(&repo_path)?;
@@ -617,12 +624,10 @@ fn advance_bookmarks(repo_path: PathBuf, push: bool, dry: bool) -> Result<()> {
             Some(c) => c,
             None => continue,
         };
-        // Check if local_branch is on the head commit already.
         let on_head = bookmarks_map.get(&head.commit_id)
             .map(|names| names.iter().any(|n| n == local_branch))
             .unwrap_or(false);
         if !on_head {
-            // Check if the bookmark exists on any other commit in the stack.
             let exists_elsewhere = stack.commits.iter().skip(1).any(|c| {
                 bookmarks_map.get(&c.commit_id)
                     .map(|names| names.iter().any(|n| n == local_branch))
@@ -639,7 +644,6 @@ fn advance_bookmarks(repo_path: PathBuf, push: bool, dry: bool) -> Result<()> {
             }
         }
 
-        // Push if requested and no remote bookmark exists yet.
         if push {
             if let Some(ref remote_branch) = entry.remote_branch {
                 if let Some((rb_name, remote)) = remote_branch.rsplit_once('@') {
@@ -667,7 +671,7 @@ fn advance_bookmarks(repo_path: PathBuf, push: bool, dry: bool) -> Result<()> {
     Ok(())
 }
 
-fn move_commit(repo_path: PathBuf, sha: String, after_commit: String) -> Result<()> {
+pub fn move_commit(repo_path: PathBuf, sha: String, after_commit: String) -> Result<()> {
     git_utils::validate_startup_requirements(&repo_path)?;
     let config = Config::load(&repo_path)?;
 
@@ -680,7 +684,7 @@ fn move_commit(repo_path: PathBuf, sha: String, after_commit: String) -> Result<
     Ok(())
 }
 
-fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
+pub fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
     use stacks::{GitStackProvider, StackProvider};
 
     const RESET: &str = "\x1b[0m";
@@ -762,7 +766,6 @@ fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
             }
         }
     }
-    // Print unstacked commits (descendants of the merge commit).
     if let Some(ref merge_ref) = config.merge_commit {
         const ORANGE: &str = "\x1b[38;5;208m";
         let unstacked = jujutsu::descendants_of(&repo_path, merge_ref)?;
@@ -803,116 +806,6 @@ fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
         println!("Rebase your stacks with \"gg rebase\"");
     }
 
-    Ok(())
-}
-
-fn run_app(repo_path: PathBuf, print_merge_command: bool, verbose: bool) -> Result<()> {
-    use stacks::{GitStackProvider, StackProvider};
-
-    git_utils::validate_startup_requirements(&repo_path)?;
-    let config = Config::load(&repo_path)?;
-    let config_stacks: Vec<String> = config.stacks.iter().map(|s| s.name.clone()).collect();
-    let merge_commit_ref = config.merge_commit.clone();
-    let provider = GitStackProvider::new(repo_path.clone(), config.trunk.clone(), config_stacks.clone(), merge_commit_ref.clone());
-    let stacks = provider.get_stacks()?;
-
-    if print_merge_command {
-        let merge_ref = config.merge_commit.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("no merge_commit in config"))?;
-        let merge_sha = jujutsu::to_sha1(&repo_path, merge_ref)?;
-        let parents = git_utils::parent_shas(&repo_path, &merge_sha)?;
-
-        let trunk_jj_ref = format!("{}@{}", config.trunk, config.workspace_remote);
-        let trunk_index = config.stacks.iter().position(|s| s.name == config.trunk)
-            .ok_or_else(|| anyhow::anyhow!("trunk '{}' not found in config stacks", config.trunk))?;
-
-        let mut cmd = format!("jj rebase -s {}", merge_ref);
-        for (i, parent_sha) in parents.iter().enumerate() {
-            if i == trunk_index {
-                cmd.push_str(&format!(" -d {}", trunk_jj_ref));
-            } else {
-                let change_id = jujutsu::to_change_id(&repo_path, parent_sha)?;
-                cmd.push_str(&format!(" -d {}", change_id));
-            }
-        }
-        println!("{cmd}");
-        return Ok(());
-    }
-
-    let model = models::build_stacks_model(&stacks);
-    let app = App::new()?;
-    app.set_stacks(model);
-
-    let reload: Rc<dyn Fn()> = {
-        let app_weak = app.as_weak();
-        let repo_path = repo_path.clone();
-        let config_stacks = config_stacks.clone();
-        let merge_commit_ref = merge_commit_ref.clone();
-        Rc::new(move || {
-            let app = match app_weak.upgrade() { Some(a) => a, None => return };
-            let provider = GitStackProvider::new(repo_path.clone(), config.trunk.clone(), config_stacks.clone(), merge_commit_ref.clone());
-            match provider.get_stacks() {
-                Ok(stacks) => app.set_stacks(models::build_stacks_model(&stacks)),
-                Err(e) => eprintln!("failed to reload stacks: {e}"),
-            }
-        })
-    };
-
-    app.on_abandon_commit({
-        let reload = Rc::clone(&reload);
-        let repo_path = repo_path.clone();
-        move |commit_id| {
-            match jujutsu::abandon_commit(&repo_path, &commit_id) {
-                Ok(()) => reload(),
-                Err(e) => eprintln!("failed to abandon {commit_id}: {e}"),
-            }
-        }
-    });
-
-    app.on_drop_onto_commit(|dragged_id, target_id| {
-        println!("[drag] drop onto: {} -> {}", dragged_id, target_id);
-    });
-
-    app.on_drop_between_commits(|dragged_id, before_id| {
-        if before_id.is_empty() {
-            println!("[drag] drop between: {} -> top of stack", dragged_id);
-        } else {
-            println!("[drag] drop between: {} -> after {}", dragged_id, before_id);
-        }
-    });
-
-    app.on_refresh({
-        let reload = Rc::clone(&reload);
-        move || reload()
-    });
-
-    app.on_add_branch({
-        let repo_path = repo_path.clone();
-        let reload = Rc::clone(&reload);
-        move |branch_name| {
-            if let Err(e) = apply_branch(repo_path.clone(), branch_name.to_string()) {
-                eprintln!("apply_branch failed: {e}");
-            } else {
-                reload();
-            }
-        }
-    });
-
-    let app_weak = app.as_weak();
-    let repo_path_for_diff = repo_path.clone();
-    app.on_select_commit(move |commit_hash| {
-        let app = app_weak.unwrap();
-        match git_utils::get_commit_diff(&repo_path_for_diff, &commit_hash) {
-            Ok(diff_lines) => {
-                app.set_diff_lines(models::build_diff_model(&diff_lines));
-            }
-            Err(e) => {
-                eprintln!("failed to get diff for {commit_hash}: {e}");
-            }
-        }
-    });
-
-    app.run()?;
     Ok(())
 }
 
