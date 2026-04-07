@@ -32,6 +32,7 @@ fn main() -> Result<()> {
         CliCommand::RereadStacks { repo_path } => reread_stacks(repo_path),
         CliCommand::Rebase { repo_path } => rebase_stacks(repo_path),
         CliCommand::Advance { repo_path, push, dry } => advance_bookmarks(repo_path, push, dry),
+        CliCommand::Move { repo_path, sha, after_commit } => move_commit(repo_path, sha, after_commit),
     }
 }
 
@@ -66,6 +67,8 @@ Subcommands:
   advance [--push] [--dry] [<path>]  Advance outdated bookmarks to their stack head
                                    --push also pushes to remote if no remote bookmark exists
                                    --dry print what would be done without making changes
+  move -r|-s <sha> <after_commit> [<path>]  Rebase <sha> after <after_commit>, then
+                                   move the working copy onto the merge commit
 "
     );
 }
@@ -105,6 +108,11 @@ enum CliCommand {
         repo_path: PathBuf,
         push: bool,
         dry: bool,
+    },
+    Move {
+        repo_path: PathBuf,
+        sha: String,
+        after_commit: String,
     },
 }
 
@@ -171,7 +179,46 @@ fn parse_command(args: Vec<String>) -> Result<CliCommand> {
         return Ok(CliCommand::Stacks { repo_path, verbose });
     }
 
+    if args.first().map(String::as_str) == Some("move") {
+        return parse_move_command(&args[1..]);
+    }
+
     parse_run_command(args)
+}
+
+fn parse_move_command(args: &[String]) -> Result<CliCommand> {
+    let mut sha: Option<String> = None;
+    let mut after_commit: Option<String> = None;
+    let mut repo_arg: Option<PathBuf> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "-r" || arg == "-s" {
+            i += 1;
+            let val = args.get(i).ok_or_else(|| anyhow::anyhow!("{arg} requires a SHA argument"))?;
+            if val.is_empty() {
+                bail!("{arg} SHA cannot be empty");
+            }
+            sha = Some(val.to_string());
+        } else if !arg.starts_with('-') {
+            if after_commit.is_none() {
+                after_commit = Some(arg.to_string());
+            } else if repo_arg.replace(PathBuf::from(arg)).is_some() {
+                bail!("unexpected argument: {arg}");
+            }
+        } else {
+            bail!("unknown argument: {arg}");
+        }
+        i += 1;
+    }
+
+    let sha = sha.ok_or_else(|| anyhow::anyhow!("move requires -r <sha> or -s <sha>"))?;
+    let after_commit = after_commit.ok_or_else(|| anyhow::anyhow!("move requires an <after_commit> argument"))?;
+    let repo_path = repo_arg
+        .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory"));
+
+    Ok(CliCommand::Move { repo_path, sha, after_commit })
 }
 
 fn parse_create_config_command(args: &[String]) -> Result<CliCommand> {
@@ -620,6 +667,19 @@ fn advance_bookmarks(repo_path: PathBuf, push: bool, dry: bool) -> Result<()> {
     Ok(())
 }
 
+fn move_commit(repo_path: PathBuf, sha: String, after_commit: String) -> Result<()> {
+    git_utils::validate_startup_requirements(&repo_path)?;
+    let config = Config::load(&repo_path)?;
+
+    jujutsu::rebase_after(&repo_path, &sha, &after_commit)?;
+
+    if let Some(ref merge_commit) = config.merge_commit {
+        jujutsu::new_only(&repo_path, merge_commit)?;
+    }
+
+    Ok(())
+}
+
 fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
     use stacks::{GitStackProvider, StackProvider};
 
@@ -728,6 +788,13 @@ fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
                     }
                 }
             }
+            println!();
+            let sha_placeholder = if unstacked.len() == 1 {
+                unstacked[0].change_id[..8.min(unstacked[0].change_id.len())].to_string()
+            } else {
+                "<sha1>".to_string()
+            };
+            println!("Move commits with: gg move -r {sha_placeholder} <stack_commit>");
         }
     }
 
