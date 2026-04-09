@@ -9,7 +9,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         CliCommand::Run { .. } => {
-            bail!("gg is the terminal-only build of guiguitsu and has no GUI; use the `guiguitsu` binary instead, or one of the subcommands (stacks, rebase, advance, move, create-config, --apply-branch, --remove-stack, --reread-stacks)");
+            bail!("gg is the terminal-only build of guiguitsu and has no GUI; use the `guiguitsu` binary instead, or one of the subcommands (stacks, rebase, advance, move, new-stack, create-config, --remove-stack, --reread-stacks)");
         }
         other => {
             cli::dispatch_non_gui(other)?;

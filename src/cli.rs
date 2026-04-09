@@ -14,8 +14,6 @@ Usage: {bin} [-C <path>] [OPTIONS] [<repo-path>]
 
 Options:
   -C <path>                        Change to <path> before doing anything
-  --apply-branch <branch>          Add <branch> as a parent of the workspace merge commit,
-                                   creating it off trunk if it does not exist
   --remove-stack <name>            Remove a stack from the workspace merge commit
   --print-merge-command            Print the jj rebase command for the merge commit and exit
   -v, --verbose                    Show extra details (e.g. root commit with --print-stacks)
@@ -39,6 +37,10 @@ Subcommands:
                                    --dry print what would be done without making changes
   move -r|-s <sha> <after_commit> [<path>]  Rebase <sha> after <after_commit>, then
                                    move the working copy onto the merge commit
+  new <parent> [-m <message>]      Create a new commit after <parent> without
+                                   editing it (jj new -A <parent> --no-edit)
+  new-stack <branch>               Add <branch> as a parent of the workspace merge commit,
+                                   creating it off trunk if it does not exist
 ",
         bin = bin_name
     );
@@ -85,6 +87,11 @@ pub enum CliCommand {
         sha: String,
         after_commit: String,
     },
+    New {
+        repo_path: PathBuf,
+        parent: String,
+        message: Option<String>,
+    },
 }
 
 pub fn parse_command(args: Vec<String>) -> Result<CliCommand> {
@@ -101,7 +108,7 @@ pub fn parse_command(args: Vec<String>) -> Result<CliCommand> {
         args = &args[2..];
     }
 
-    if args.iter().any(|a| a == "--help" || a == "-h") {
+    if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
         return Ok(CliCommand::Help);
     }
 
@@ -150,11 +157,59 @@ pub fn parse_command(args: Vec<String>) -> Result<CliCommand> {
         return Ok(CliCommand::Stacks { repo_path, verbose });
     }
 
+    if args.first().map(String::as_str) == Some("new-stack") {
+        let branch_name = args.get(1)
+            .ok_or_else(|| anyhow::anyhow!("new-stack requires a <branch> argument"))?
+            .to_string();
+        if branch_name.is_empty() {
+            bail!("new-stack branch cannot be empty");
+        }
+        let repo_path = args.get(2).map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory"));
+        return Ok(CliCommand::ApplyBranch { repo_path, branch_name });
+    }
+
     if args.first().map(String::as_str) == Some("move") {
         return parse_move_command(&args[1..]);
     }
 
+    if args.first().map(String::as_str) == Some("new") {
+        return parse_new_command(&args[1..]);
+    }
+
     parse_run_command(args)
+}
+
+fn parse_new_command(args: &[String]) -> Result<CliCommand> {
+    let mut parent: Option<String> = None;
+    let mut message: Option<String> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "-m" {
+            i += 1;
+            let val = args.get(i).ok_or_else(|| anyhow::anyhow!("-m requires a message argument"))?;
+            message = Some(val.to_string());
+        } else if let Some(val) = arg.strip_prefix("-m") {
+            message = Some(val.to_string());
+        } else if let Some(val) = arg.strip_prefix("--message=") {
+            message = Some(val.to_string());
+        } else if !arg.starts_with('-') {
+            if parent.is_some() {
+                bail!("unexpected argument: {arg}");
+            }
+            parent = Some(arg.to_string());
+        } else {
+            bail!("unknown argument: {arg}");
+        }
+        i += 1;
+    }
+
+    let parent = parent.ok_or_else(|| anyhow::anyhow!("new requires a <parent> argument"))?;
+    let repo_path = std::env::current_dir().expect("failed to get current directory");
+
+    Ok(CliCommand::New { repo_path, parent, message })
 }
 
 fn parse_move_command(args: &[String]) -> Result<CliCommand> {
@@ -277,7 +332,6 @@ fn parse_run_command(args: &[String]) -> Result<CliCommand> {
     let mut print_merge_command = false;
     let mut verbose = false;
     let mut reread_stacks = false;
-    let mut apply_branch: Option<String> = None;
     let mut remove_stack: Option<String> = None;
 
     let mut i = 0;
@@ -289,18 +343,6 @@ fn parse_run_command(args: &[String]) -> Result<CliCommand> {
             verbose = true;
         } else if arg == "--reread-stacks" {
             reread_stacks = true;
-        } else if let Some(val) = arg.strip_prefix("--apply-branch=") {
-            if val.is_empty() {
-                bail!("--apply-branch cannot be empty");
-            }
-            apply_branch = Some(val.to_string());
-        } else if arg == "--apply-branch" {
-            i += 1;
-            let val = args.get(i).ok_or_else(|| anyhow::anyhow!("--apply-branch requires a branch name"))?;
-            if val.is_empty() {
-                bail!("--apply-branch cannot be empty");
-            }
-            apply_branch = Some(val.to_string());
         } else if let Some(val) = arg.strip_prefix("--remove-stack=") {
             if val.is_empty() {
                 bail!("--remove-stack cannot be empty");
@@ -323,10 +365,6 @@ fn parse_run_command(args: &[String]) -> Result<CliCommand> {
 
     let repo_path = repo_arg
         .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory"));
-
-    if let Some(branch_name) = apply_branch {
-        return Ok(CliCommand::ApplyBranch { repo_path, branch_name });
-    }
 
     if let Some(stack_name) = remove_stack {
         return Ok(CliCommand::RemoveStack { repo_path, stack_name });
@@ -380,6 +418,10 @@ pub fn dispatch_non_gui(cmd: CliCommand) -> Result<bool> {
         }
         CliCommand::Move { repo_path, sha, after_commit } => {
             move_commit(repo_path, sha, after_commit)?;
+            Ok(true)
+        }
+        CliCommand::New { repo_path, parent, message } => {
+            new_commit(repo_path, parent, message)?;
             Ok(true)
         }
         CliCommand::Run { .. } => Ok(false),
@@ -436,22 +478,17 @@ pub fn apply_branch(repo_path: PathBuf, branch_name: String) -> Result<()> {
 
     let (merge_sha, mut parents) = git_utils::find_workspace_merge_commit(&repo_path)?;
 
-    if !git_utils::local_branch_exists(&repo_path, &branch_name)? {
-        let sha = jujutsu::new_at(&repo_path, &config.trunk)?;
-        jujutsu::create_bookmark(&repo_path, &branch_name, &sha)?;
-    }
-    let branch_head = git_utils::resolve_ref(&repo_path, &branch_name)?;
-    parents.push(branch_head);
+    let trunk_remote = format!("{}@{}", config.trunk, config.workspace_remote);
+    let new_commit_sha = jujutsu::new_no_edit_on(&repo_path, &trunk_remote)?;
+    parents.push(new_commit_sha);
 
     let new_merge_sha = jujutsu::rebase_merge_commit(&repo_path, &merge_sha, &parents)?;
     jujutsu::new_at(&repo_path, &new_merge_sha)?;
 
-    let stack_count = config.stacks.iter().filter(|s| s.name != "workspace" && s.name != config.trunk).count();
-    let stack_name = format!("stack{}", stack_count + 1);
     config.stacks.push(config::StackEntry {
-        name: stack_name.clone(),
-        local_branch: Some(stack_name.clone()),
-        remote_branch: Some(format!("{}@{}", stack_name, config.workspace_remote)),
+        name: branch_name.clone(),
+        local_branch: Some(branch_name.clone()),
+        remote_branch: Some(format!("{}@{}", branch_name, config.workspace_remote)),
     });
     config.save(&repo_path)?;
     Ok(())
@@ -671,6 +708,12 @@ pub fn advance_bookmarks(repo_path: PathBuf, push: bool, dry: bool) -> Result<()
     Ok(())
 }
 
+pub fn new_commit(repo_path: PathBuf, parent: String, message: Option<String>) -> Result<()> {
+    git_utils::validate_startup_requirements(&repo_path)?;
+    jujutsu::new_after(&repo_path, &parent, message.as_deref())?;
+    Ok(())
+}
+
 pub fn move_commit(repo_path: PathBuf, sha: String, after_commit: String) -> Result<()> {
     git_utils::validate_startup_requirements(&repo_path)?;
     let config = Config::load(&repo_path)?;
@@ -762,18 +805,22 @@ pub fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
                 } else {
                     String::new()
                 };
-                println!("  {DIM}{} / {}{RESET} {}{bookmark_suffix}", &commit.change_id[..8.min(commit.change_id.len())], &commit.commit_id[..8.min(commit.commit_id.len())], commit.description);
+                let empty_suffix = if jujutsu::is_empty_commit(&repo_path, &commit.commit_id).unwrap_or(false) {
+                    format!(" {RED}(empty){RESET}")
+                } else {
+                    String::new()
+                };
+                println!("  {DIM}{} / {}{RESET} {}{bookmark_suffix}{empty_suffix}", &commit.change_id[..8.min(commit.change_id.len())], &commit.commit_id[..8.min(commit.commit_id.len())], commit.description);
             }
         }
     }
     if let Some(ref merge_ref) = config.merge_commit {
-        const ORANGE: &str = "\x1b[38;5;208m";
         let unstacked = jujutsu::descendants_of(&repo_path, merge_ref)?;
         if !unstacked.is_empty() {
             println!("{CYAN}Unstacked{RESET}");
             for commit in &unstacked {
                 let empty_suffix = if jujutsu::is_empty_commit(&repo_path, &commit.commit_id).unwrap_or(false) {
-                    format!(" {ORANGE}(empty){RESET}")
+                    format!(" {RED}(empty){RESET}")
                 } else {
                     String::new()
                 };
@@ -817,7 +864,8 @@ mod tests {
 
     use anyhow::{Context, Result, anyhow};
 
-    use super::apply_branch;
+    use super::{apply_branch, new_commit};
+    use crate::git_utils::{parent_shas, run_command};
     use crate::stacks::{GitStackProvider, StackProvider};
 
     struct TempRepo {
@@ -870,7 +918,69 @@ mod tests {
         let names: Vec<&str> = stacks.iter().map(|s| s.name.as_str()).collect();
 
         assert_eq!(names.len(), 3, "expected 3 stacks, got: {names:?}");
-        assert!(names.contains(&"stack1"), "expected 'stack1' in stacks, got: {names:?}");
+        assert!(names.contains(&"foo"), "expected 'foo' in stacks, got: {names:?}");
+        Ok(())
+    }
+
+    struct TempNewRepo {
+        path: PathBuf,
+    }
+
+    impl TempNewRepo {
+        fn create() -> Result<Self> {
+            let mut path = std::env::temp_dir();
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .context("time went backwards")?
+                .as_nanos();
+            path.push(format!("guiguitsu-new-test-{now}-{}", std::process::id()));
+
+            let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/repos/test_new.sh");
+            let output = Command::new("bash")
+                .arg(script)
+                .arg(&path)
+                .output()
+                .context("failed to execute test_new.sh")?;
+
+            if !output.status.success() {
+                return Err(anyhow!(
+                    "test_new.sh failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+
+            Ok(Self { path })
+        }
+    }
+
+    impl Drop for TempNewRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn new_commit_creates_child_after_parent_with_message() -> Result<()> {
+        let repo = TempNewRepo::create()?;
+
+        let parent_sha = run_command("git", &["rev-parse", "main"], Some(&repo.path))?;
+
+        new_commit(repo.path.clone(), parent_sha.clone(), Some("my new commit".to_string()))?;
+
+        // Find the commit whose subject is "my new commit" and verify its parent is `parent_sha`.
+        let new_sha = run_command(
+            "git",
+            &["log", "--all", "--format=%H", "--grep=^my new commit$"],
+            Some(&repo.path),
+        )?;
+        let new_sha = new_sha.lines().next().unwrap_or("").to_string();
+        assert!(!new_sha.is_empty(), "expected to find commit with subject 'my new commit'");
+        assert_eq!(parent_shas(&repo.path, &new_sha)?, vec![parent_sha]);
+
+        // --no-edit: working copy should not be on the new commit.
+        let at_sha = run_command("jj", &["log", "-r", "@", "--no-graph", "-T", "commit_id"], Some(&repo.path))?;
+        assert_ne!(at_sha.trim(), new_sha, "working copy should not be on the new commit");
+
         Ok(())
     }
 
@@ -883,8 +993,8 @@ mod tests {
         let config = crate::config::Config::load(&repo.path)?;
         assert_eq!(
             config.stacks.last().map(|s| s.name.as_str()),
-            Some("stack1"),
-            "expected 'stack1' as last stack in config, got: {:?}",
+            Some("bar"),
+            "expected 'bar' as last stack in config, got: {:?}",
             config.stacks
         );
         Ok(())

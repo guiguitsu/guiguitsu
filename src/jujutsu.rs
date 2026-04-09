@@ -150,6 +150,33 @@ pub fn new_only(repo_path: &Path, revision: &str) -> Result<()> {
     Ok(())
 }
 
+/// Return commit SHAs of the direct children of `revision`.
+fn children_of(repo_path: &Path, revision: &str) -> Result<Vec<String>> {
+    let revset = format!("{revision}+");
+    let output = run_jj(
+        repo_path,
+        &["log", "-r", &revset, "--no-graph", "-T", r#"commit_id ++ "\n""#],
+    )?;
+    Ok(output
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
+}
+
+/// Create a new empty commit on top of `revision` without moving @, and
+/// return the commit SHA of the newly created child.
+pub fn new_no_edit_on(repo_path: &Path, revision: &str) -> Result<String> {
+    let before: std::collections::HashSet<String> =
+        children_of(repo_path, revision)?.into_iter().collect();
+    run_jj(repo_path, &["new", revision, "--no-edit"])?;
+    let after = children_of(repo_path, revision)?;
+    after
+        .into_iter()
+        .find(|s| !before.contains(s))
+        .ok_or_else(|| anyhow::anyhow!("failed to identify newly created commit on {revision}"))
+}
+
 /// Returns the output of `jj resolve --list`, or empty string if no conflicts.
 pub fn resolve_list(repo_path: &Path) -> Result<String> {
     match run_jj(repo_path, &["resolve", "--list", "--color=always"]) {
@@ -184,6 +211,16 @@ pub fn create_merge_commit(repo_path: &Path, message: &str, shas: &[&str], do_ne
 
 pub fn describe_current(repo_path: &Path, message: &str) -> Result<()> {
     run_jj(repo_path, &["desc", "-m", message])?;
+    Ok(())
+}
+
+pub fn new_after(repo_path: &Path, parent: &str, message: Option<&str>) -> Result<()> {
+    let mut args = vec!["new", "-A", parent, "--no-edit"];
+    if let Some(msg) = message {
+        args.push("-m");
+        args.push(msg);
+    }
+    run_jj(repo_path, &args)?;
     Ok(())
 }
 

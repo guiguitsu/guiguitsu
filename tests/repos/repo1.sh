@@ -20,7 +20,10 @@ mkdir -p "$repo_path"
 cd "$repo_path"
 
 git init
-git remote add origin https://dummy.com/repo1.git
+# Create a real bare repo as origin so remote-tracking refs (e.g. main@origin) exist
+git init --bare .origin.git
+echo "/.origin.git" >> .git/info/exclude
+git remote add origin "$(pwd)/.origin.git"
 git symbolic-ref HEAD refs/heads/main
 git config user.name "Test User"
 git config user.email "test@example.com"
@@ -90,8 +93,12 @@ git commit -m "branch2 commit 2"
 
 git checkout main
 
+# Push main to the local bare origin so main@origin exists as a remote-tracking ref
+git push origin main
+
 # Initialize jj colocated repo
 jj git init --colocate
+jj git import
 
 # Create workspace branch off main and add guiguitsu config
 jj new main
