@@ -41,6 +41,8 @@ Subcommands:
                                    editing it (jj new -A <parent> --no-edit)
   new-stack <branch>               Add <branch> as a parent of the workspace merge commit,
                                    creating it off trunk if it does not exist
+  rm-stack [<branch>]              Remove <branch> from the workspace merge commit parents
+                                   and from the config. With no arg, list removable stacks.
 ",
         bin = bin_name
     );
@@ -70,6 +72,9 @@ pub enum CliCommand {
     RemoveStack {
         repo_path: PathBuf,
         stack_name: String,
+    },
+    ListStacks {
+        repo_path: PathBuf,
     },
     RereadStacks {
         repo_path: PathBuf,
@@ -155,6 +160,16 @@ pub fn parse_command(args: Vec<String>) -> Result<CliCommand> {
         let repo_path = repo_arg
             .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory"));
         return Ok(CliCommand::Stacks { repo_path, verbose });
+    }
+
+    if args.first().map(String::as_str) == Some("rm-stack") {
+        let repo_path = std::env::current_dir().expect("failed to get current directory");
+        match args.get(1) {
+            Some(name) if !name.is_empty() => {
+                return Ok(CliCommand::RemoveStack { repo_path, stack_name: name.to_string() });
+            }
+            _ => return Ok(CliCommand::ListStacks { repo_path }),
+        }
     }
 
     if args.first().map(String::as_str) == Some("new-stack") {
@@ -404,6 +419,10 @@ pub fn dispatch_non_gui(cmd: CliCommand) -> Result<bool> {
             remove_stack(repo_path, stack_name)?;
             Ok(true)
         }
+        CliCommand::ListStacks { repo_path } => {
+            list_removable_stacks(repo_path)?;
+            Ok(true)
+        }
         CliCommand::RereadStacks { repo_path } => {
             reread_stacks(repo_path)?;
             Ok(true)
@@ -482,8 +501,8 @@ pub fn apply_branch(repo_path: PathBuf, branch_name: String) -> Result<()> {
     let new_commit_sha = jujutsu::new_no_edit_on(&repo_path, &trunk_remote)?;
     parents.push(new_commit_sha);
 
-    let new_merge_sha = jujutsu::rebase_merge_commit(&repo_path, &merge_sha, &parents)?;
-    jujutsu::new_at(&repo_path, &new_merge_sha)?;
+    let merge_change_id = jujutsu::to_change_id(&repo_path, &merge_sha)?;
+    jujutsu::rebase_merge_commit(&repo_path, &merge_change_id, &parents, true)?;
 
     config.stacks.push(config::StackEntry {
         name: branch_name.clone(),
@@ -491,6 +510,24 @@ pub fn apply_branch(repo_path: PathBuf, branch_name: String) -> Result<()> {
         remote_branch: Some(format!("{}@{}", branch_name, config.workspace_remote)),
     });
     config.save(&repo_path)?;
+    jujutsu::absorb(&repo_path, &[config::FILE_NAME])?;
+    Ok(())
+}
+
+pub fn list_removable_stacks(repo_path: PathBuf) -> Result<()> {
+    let config = Config::load(&repo_path)?;
+    let names: Vec<&str> = config.stacks.iter()
+        .map(|s| s.name.as_str())
+        .filter(|n| *n != "workspace" && *n != config.trunk)
+        .collect();
+    if names.is_empty() {
+        println!("No removable stacks.");
+    } else {
+        println!("Removable stacks:");
+        for n in names {
+            println!("  {n}");
+        }
+    }
     Ok(())
 }
 
@@ -520,8 +557,8 @@ pub fn remove_stack(repo_path: PathBuf, stack_name: String) -> Result<()> {
         .map(|(_, p)| p)
         .collect();
 
-    let new_merge_sha = jujutsu::rebase_merge_commit(&repo_path, &merge_sha, &new_parents)?;
-    jujutsu::new_at(&repo_path, &new_merge_sha)?;
+    let merge_change_id = jujutsu::to_change_id(&repo_path, &merge_sha)?;
+    jujutsu::rebase_merge_commit(&repo_path, &merge_change_id, &new_parents, true)?;
 
     config.stacks.remove(stack_index);
     config.save(&repo_path)?;
@@ -864,8 +901,8 @@ mod tests {
 
     use anyhow::{Context, Result, anyhow};
 
-    use super::{apply_branch, new_commit};
-    use crate::git_utils::{parent_shas, run_command};
+    use super::{apply_branch, new_commit, remove_stack};
+    use crate::git_utils::{find_workspace_merge_commit, parent_shas, run_command};
     use crate::stacks::{GitStackProvider, StackProvider};
 
     struct TempRepo {
@@ -997,6 +1034,36 @@ mod tests {
             "expected 'bar' as last stack in config, got: {:?}",
             config.stacks
         );
+        Ok(())
+    }
+
+    #[test]
+    fn remove_stack_drops_branch_from_config_and_merge_parents() -> Result<()> {
+        let repo = TempRepo::create()?;
+
+        // Baseline: workspace merge commit has 2 parents (workspace, main).
+        let (_merge_sha, baseline_parents) = find_workspace_merge_commit(&repo.path)?;
+        assert_eq!(baseline_parents.len(), 2);
+
+        apply_branch(repo.path.clone(), "foo".to_string())?;
+
+        let (_merge_sha, after_add) = find_workspace_merge_commit(&repo.path)?;
+        assert_eq!(after_add.len(), 3, "expected 3 parents after new-stack, got: {after_add:?}");
+
+        remove_stack(repo.path.clone(), "foo".to_string())?;
+
+        // Config no longer contains "foo".
+        let config = crate::config::Config::load(&repo.path)?;
+        assert!(
+            config.stacks.iter().all(|s| s.name != "foo"),
+            "expected 'foo' removed from config, got: {:?}",
+            config.stacks
+        );
+
+        // Merge commit is back to 2 parents.
+        let (_merge_sha, after_rm) = find_workspace_merge_commit(&repo.path)?;
+        assert_eq!(after_rm.len(), 2, "expected 2 parents after rm-stack, got: {after_rm:?}");
+
         Ok(())
     }
 }

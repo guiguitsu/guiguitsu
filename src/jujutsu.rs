@@ -90,11 +90,12 @@ pub fn ensure_user_config(repo_path: &Path) -> Result<()> {
 
 /// Rebase the merge commit onto the given parents.
 /// Returns the new git commit SHA (the SHA changes because parents changed).
-pub fn rebase_merge_commit(repo_path: &Path, merge_sha: &str, parents: &[String]) -> Result<String> {
+pub fn rebase_merge_commit(repo_path: &Path, merge_sha: &str, parents: &[String], use_source: bool) -> Result<String> {
     // Capture the change-id before the rebase — it survives the operation unchanged.
     let change_id = run_jj(repo_path, &["log", "-r", merge_sha, "--no-graph", "-T", "change_id"])?;
 
-    let mut args = vec!["rebase", "-r", merge_sha];
+    let flag = if use_source { "-s" } else { "-r" };
+    let mut args = vec!["rebase", flag, merge_sha];
     for parent in parents {
         args.push("-d");
         args.push(parent.as_str());
