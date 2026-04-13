@@ -55,6 +55,37 @@ pub(crate) fn run_command(command: &str, args: &[&str], current_dir: Option<&Pat
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+pub(crate) fn run_command_interactive(command: &str, args: &[&str], current_dir: Option<&Path>) -> Result<()> {
+    let mut process = Command::new(command);
+    if let Some(current_dir) = current_dir {
+        process.current_dir(current_dir);
+    }
+
+    let rendered_args = if args.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", args.join(" "))
+    };
+    if std::env::var("VERBOSE").as_deref() == Ok("1") {
+        if let Some(current_dir) = current_dir {
+            eprintln!("cd {} && {}{}", current_dir.display(), command, rendered_args);
+        } else {
+            eprintln!("{}{}", command, rendered_args);
+        }
+    }
+
+    let status = process
+        .args(args)
+        .status()
+        .with_context(|| format!("failed to run {command} with args: {args:?}"))?;
+
+    if !status.success() {
+        bail!("{command} command failed with args {args:?} (exit code: {:?})", status.code());
+    }
+
+    Ok(())
+}
+
 fn run_git(repo_path: &Path, args: &[&str]) -> Result<String> {
     run_command("git", args, Some(repo_path))
 }

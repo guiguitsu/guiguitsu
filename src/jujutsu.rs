@@ -4,7 +4,7 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 
-use crate::git_utils::run_command;
+use crate::git_utils::{run_command, run_command_interactive};
 
 fn run_jj(repo_path: &Path, args: &[&str]) -> Result<String> {
     run_command("jj", args, Some(repo_path))
@@ -215,6 +215,11 @@ pub fn describe_current(repo_path: &Path, message: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn describe_revision(repo_path: &Path, revision: &str, message: &str) -> Result<()> {
+    run_jj(repo_path, &["desc", "-r", revision, "-m", message])?;
+    Ok(())
+}
+
 pub fn new_after(repo_path: &Path, parent: &str, message: Option<&str>) -> Result<()> {
     let mut args = vec!["new", "-A", parent, "--no-edit"];
     if let Some(msg) = message {
@@ -226,7 +231,7 @@ pub fn new_after(repo_path: &Path, parent: &str, message: Option<&str>) -> Resul
 }
 
 pub fn rebase_after(repo_path: &Path, revision: &str, target: &str) -> Result<()> {
-    run_jj(repo_path, &["rebase", "-r", revision, "-A", target])?;
+    run_jj(repo_path, &["rebase", "--ignore-immutable", "-r", revision, "-A", target])?;
     Ok(())
 }
 
@@ -333,6 +338,17 @@ pub fn absorb(repo_path: &Path, paths: &[&str]) -> Result<()> {
     args.extend_from_slice(paths);
     run_jj(repo_path, &args)?;
     Ok(())
+}
+
+pub fn squash_from_into(repo_path: &Path, from_commits: &[String], into_commit: &str) -> Result<()> {
+    let mut args: Vec<&str> = vec!["squash"];
+    for from in from_commits {
+        args.push("--from");
+        args.push(from.as_str());
+    }
+    args.push("--into");
+    args.push(into_commit);
+    run_command_interactive("jj", &args, Some(repo_path))
 }
 
 #[cfg(test)]

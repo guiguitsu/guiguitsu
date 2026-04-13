@@ -85,4 +85,17 @@ impl Config {
     pub fn base_ref(&self) -> String {
         format!("{}/{}", self.workspace_remote, self.trunk)
     }
+
+    /// If the only stacks are "workspace" and the trunk, returns the trunk
+    /// stack name. Otherwise returns `None`.
+    pub fn candidate_stack_to_receive_commit(&self) -> Option<&str> {
+        if self.stacks.len() == 2
+            && self.stacks.iter().any(|s| s.name == "workspace")
+            && self.stacks.iter().any(|s| s.name == self.trunk)
+        {
+            Some(&self.trunk)
+        } else {
+            None
+        }
+    }
 }

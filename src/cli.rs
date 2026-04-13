@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -35,7 +36,8 @@ Subcommands:
   advance [--push] [--dry] [<path>]  Advance outdated bookmarks to their stack head
                                    --push also pushes to remote if no remote bookmark exists
                                    --dry print what would be done without making changes
-  move -r|-s <sha> <after_commit> [<path>]  Rebase <sha> after <after_commit>, then
+  move -r|-s <sha> <after_commit> [-m <message>] [<path>]
+                                   Rebase <sha> after <after_commit>, then
                                    move the working copy onto the merge commit
   new <parent> [-m <message>]      Create a new commit after <parent> without
                                    editing it (jj new -A <parent> --no-edit)
@@ -43,6 +45,8 @@ Subcommands:
                                    creating it off trunk if it does not exist
   rm-stack [<branch>]              Remove <branch> from the workspace merge commit parents
                                    and from the config. With no arg, list removable stacks.
+  join <from>... <into>            Squash one or more commits into a destination commit
+                                   (runs jj squash --from <from> ... --into <into>)
 ",
         bin = bin_name
     );
@@ -91,11 +95,17 @@ pub enum CliCommand {
         repo_path: PathBuf,
         sha: String,
         after_commit: String,
+        message: Option<String>,
     },
     New {
         repo_path: PathBuf,
         parent: String,
         message: Option<String>,
+    },
+    Join {
+        repo_path: PathBuf,
+        from_commits: Vec<String>,
+        into_commit: String,
     },
 }
 
@@ -192,6 +202,10 @@ pub fn parse_command(args: Vec<String>) -> Result<CliCommand> {
         return parse_new_command(&args[1..]);
     }
 
+    if args.first().map(String::as_str) == Some("join") {
+        return parse_join_command(&args[1..]);
+    }
+
     parse_run_command(args)
 }
 
@@ -227,10 +241,22 @@ fn parse_new_command(args: &[String]) -> Result<CliCommand> {
     Ok(CliCommand::New { repo_path, parent, message })
 }
 
+fn parse_join_command(args: &[String]) -> Result<CliCommand> {
+    let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
+    if positional.len() < 2 {
+        bail!("join requires at least two arguments: <from>... <into>");
+    }
+    let into_commit = positional.last().unwrap().to_string();
+    let from_commits: Vec<String> = positional[..positional.len() - 1].iter().map(|s| s.to_string()).collect();
+    let repo_path = std::env::current_dir().expect("failed to get current directory");
+    Ok(CliCommand::Join { repo_path, from_commits, into_commit })
+}
+
 fn parse_move_command(args: &[String]) -> Result<CliCommand> {
     let mut sha: Option<String> = None;
     let mut after_commit: Option<String> = None;
     let mut repo_arg: Option<PathBuf> = None;
+    let mut message: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -242,6 +268,10 @@ fn parse_move_command(args: &[String]) -> Result<CliCommand> {
                 bail!("{arg} SHA cannot be empty");
             }
             sha = Some(val.to_string());
+        } else if arg == "-m" {
+            i += 1;
+            let val = args.get(i).ok_or_else(|| anyhow::anyhow!("-m requires a message argument"))?;
+            message = Some(val.to_string());
         } else if !arg.starts_with('-') {
             if after_commit.is_none() {
                 after_commit = Some(arg.to_string());
@@ -259,7 +289,7 @@ fn parse_move_command(args: &[String]) -> Result<CliCommand> {
     let repo_path = repo_arg
         .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory"));
 
-    Ok(CliCommand::Move { repo_path, sha, after_commit })
+    Ok(CliCommand::Move { repo_path, sha, after_commit, message })
 }
 
 fn parse_create_config_command(args: &[String]) -> Result<CliCommand> {
@@ -435,12 +465,16 @@ pub fn dispatch_non_gui(cmd: CliCommand) -> Result<bool> {
             advance_bookmarks(repo_path, push, dry)?;
             Ok(true)
         }
-        CliCommand::Move { repo_path, sha, after_commit } => {
-            move_commit(repo_path, sha, after_commit)?;
+        CliCommand::Move { repo_path, sha, after_commit, message } => {
+            move_commit(repo_path, sha, after_commit, message)?;
             Ok(true)
         }
         CliCommand::New { repo_path, parent, message } => {
             new_commit(repo_path, parent, message)?;
+            Ok(true)
+        }
+        CliCommand::Join { repo_path, from_commits, into_commit } => {
+            join_commits(repo_path, from_commits, into_commit)?;
             Ok(true)
         }
         CliCommand::Run { .. } => Ok(false),
@@ -751,17 +785,52 @@ pub fn new_commit(repo_path: PathBuf, parent: String, message: Option<String>) -
     Ok(())
 }
 
-pub fn move_commit(repo_path: PathBuf, sha: String, after_commit: String) -> Result<()> {
+pub fn join_commits(repo_path: PathBuf, from_commits: Vec<String>, into_commit: String) -> Result<()> {
+    git_utils::validate_startup_requirements(&repo_path)?;
+    jujutsu::squash_from_into(&repo_path, &from_commits, &into_commit)?;
+    Ok(())
+}
+
+pub fn move_commit(repo_path: PathBuf, sha: String, after_commit: String, message: Option<String>) -> Result<()> {
     git_utils::validate_startup_requirements(&repo_path)?;
     let config = Config::load(&repo_path)?;
 
     jujutsu::rebase_after(&repo_path, &sha, &after_commit)?;
+
+    if let Some(ref msg) = message {
+        jujutsu::describe_revision(&repo_path, &sha, msg)?;
+    }
 
     if let Some(ref merge_commit) = config.merge_commit {
         jujutsu::new_only(&repo_path, merge_commit)?;
     }
 
     Ok(())
+}
+
+/// Resolves branch names to commit SHAs using git rev-parse, returning a map
+/// from commit SHA to branch names. This is more reliable than jj's bookmark
+/// tracking which can diverge from actual git refs.
+fn resolve_branches_by_commit(repo_path: &Path, config: &Config) -> HashMap<String, Vec<String>> {
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+    for entry in &config.stacks {
+        if let Some(ref local_branch) = entry.local_branch {
+            let git_ref = format!("refs/heads/{local_branch}");
+            if let Ok(sha) = git_utils::resolve_ref(repo_path, &git_ref) {
+                map.entry(sha).or_default().push(local_branch.clone());
+            }
+        }
+        if let Some(ref remote_branch) = entry.remote_branch {
+            // remote_branch is in jj format "branch@remote", convert to git ref
+            if let Some((branch, remote)) = remote_branch.rsplit_once('@') {
+                let git_ref = format!("refs/remotes/{remote}/{branch}");
+                if let Ok(sha) = git_utils::resolve_ref(repo_path, &git_ref) {
+                    map.entry(sha).or_default().push(remote_branch.clone());
+                }
+            }
+        }
+    }
+    map
 }
 
 pub fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
@@ -782,7 +851,30 @@ pub fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
     let stacks = provider.get_stacks()?;
 
     let trunk_remote_ref = config.base_ref();
-    let bookmarks_map = jujutsu::bookmarks_by_commit(&repo_path).unwrap_or_default();
+    let bookmarks_map = resolve_branches_by_commit(&repo_path, &config);
+
+    // Build a map of head-commit-SHA → push command for stacks whose remote branch
+    // is not pointing at the head commit.
+    let mut push_commands: HashMap<String, String> = HashMap::new();
+    for (stack, entry) in stacks.iter().zip(config.stacks.iter()) {
+        if let Some(ref remote_branch) = entry.remote_branch {
+            if let Some((branch, remote)) = remote_branch.rsplit_once('@') {
+                let head_sha = stack.head_commit_id().unwrap_or(&stack.base_commit_id);
+                let git_ref = format!("refs/remotes/{remote}/{branch}");
+                let remote_on_head = git_utils::resolve_ref(&repo_path, &git_ref)
+                    .map(|sha| sha == head_sha)
+                    .unwrap_or(false);
+                if !remote_on_head {
+                    let short = &head_sha[..8.min(head_sha.len())];
+                    push_commands.insert(
+                        head_sha.to_string(),
+                        format!("git push {remote} {short}:refs/heads/{branch}"),
+                    );
+                }
+            }
+        }
+    }
+
     let mut needs_rebase = false;
     for stack in &stacks {
         let is_trunk = stack.name == config.trunk;
@@ -802,6 +894,40 @@ pub fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
             };
             print!("{CYAN}{}{RESET}", stack.name);
             println!(" ({GREEN}head: {} - {}{RESET}){trunk_notice}", &head_change_id[..8.min(head_change_id.len())], head_subject);
+            // List commits from trunk HEAD back to (and including) the remote trunk ref.
+            if let Ok(trunk_remote_sha) = git_utils::resolve_ref(&repo_path, &trunk_remote_ref) {
+                if let Ok(mut trunk_commits) = git_utils::commits_in_range(&repo_path, &trunk_remote_sha, head_sha) {
+                    for commit in &mut trunk_commits {
+                        if let Ok(cid) = jujutsu::to_change_id(&repo_path, &commit.commit_id) {
+                            commit.change_id = cid;
+                        }
+                    }
+                    // Append the remote trunk commit itself.
+                    if let Ok(remote_subject) = git_utils::commit_subject(&repo_path, &trunk_remote_sha) {
+                        let remote_change_id = jujutsu::to_change_id(&repo_path, &trunk_remote_sha).unwrap_or_else(|_| trunk_remote_sha.clone());
+                        trunk_commits.push(git_utils::CommitInfo {
+                            commit_id: trunk_remote_sha.clone(),
+                            change_id: remote_change_id,
+                            description: remote_subject,
+                            author: String::new(),
+                            timestamp: String::new(),
+                            changed_files: vec![],
+                        });
+                    }
+                    for commit in &trunk_commits {
+                        let bookmark_suffix = if let Some(names) = bookmarks_map.get(&commit.commit_id) {
+                            let colored: Vec<String> = names.iter().map(|n| n.clone()).collect();
+                            format!(" {DIM}[{}]{RESET}", colored.join(", "))
+                        } else {
+                            String::new()
+                        };
+                        let push_suffix = push_commands.get(&commit.commit_id)
+                            .map(|cmd| format!(" {RED}{cmd}{RESET}"))
+                            .unwrap_or_default();
+                        println!("  {DIM}{} / {}{RESET} {}{bookmark_suffix}{push_suffix}", &commit.change_id[..8.min(commit.change_id.len())], &commit.commit_id[..8.min(commit.commit_id.len())], commit.description);
+                    }
+                }
+            }
         } else {
             let base = &stack.base_commit_id;
             let base_change_id = jujutsu::to_change_id(&repo_path, base).unwrap_or_default();
@@ -847,7 +973,26 @@ pub fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
                 } else {
                     String::new()
                 };
-                println!("  {DIM}{} / {}{RESET} {}{bookmark_suffix}{empty_suffix}", &commit.change_id[..8.min(commit.change_id.len())], &commit.commit_id[..8.min(commit.commit_id.len())], commit.description);
+                let push_suffix = push_commands.get(&commit.commit_id)
+                    .map(|cmd| format!(" {RED}{cmd}{RESET}"))
+                    .unwrap_or_default();
+                println!("  {DIM}{} / {}{RESET} {}{bookmark_suffix}{empty_suffix}{push_suffix}", &commit.change_id[..8.min(commit.change_id.len())], &commit.commit_id[..8.min(commit.commit_id.len())], commit.description);
+            }
+            if verbose {
+                if let (Some(root), Some(head)) = (stack.root_commit_id(), stack.head_commit_id()) {
+                    if let Ok(diff_output) = git_utils::run_command(
+                        "git",
+                        &["diff", "--name-status", &format!("{root}^..{head}")],
+                        Some(&repo_path),
+                    ) {
+                        for line in diff_output.lines() {
+                            let line = line.trim();
+                            if !line.is_empty() {
+                                println!("    {GREEN}{line}{RESET}");
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -875,13 +1020,27 @@ pub fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
                     }
                 }
             }
-            println!();
-            let sha_placeholder = if unstacked.len() == 1 {
-                unstacked[0].change_id[..8.min(unstacked[0].change_id.len())].to_string()
-            } else {
-                "<sha1>".to_string()
-            };
-            println!("Move commits with: gg move -r {sha_placeholder} <stack_commit>");
+            let all_empty = unstacked.iter().all(|c| {
+                jujutsu::is_empty_commit(&repo_path, &c.commit_id).unwrap_or(false)
+            });
+            if !all_empty {
+                println!();
+                let sha_placeholder = if unstacked.len() == 1 {
+                    unstacked[0].change_id[..8.min(unstacked[0].change_id.len())].to_string()
+                } else {
+                    "<sha1>".to_string()
+                };
+                let target_placeholder = config.candidate_stack_to_receive_commit()
+                    .and_then(|candidate_name| {
+                        stacks.iter()
+                            .find(|s| s.name == candidate_name)
+                            .map(|s| s.head_commit_id().unwrap_or(&s.base_commit_id))
+                            .and_then(|sha| jujutsu::to_change_id(&repo_path, sha).ok())
+                    })
+                    .map(|cid| cid[..8.min(cid.len())].to_string())
+                    .unwrap_or_else(|| "<stack_commit>".to_string());
+                println!("Move commits with: gg move -r {sha_placeholder} {target_placeholder} [-m '<message>']");
+            }
         }
     }
 
