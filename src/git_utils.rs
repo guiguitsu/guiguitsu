@@ -155,6 +155,14 @@ pub fn ensure_remote_exists(repo_path: &Path, remote: &str) -> Result<()> {
     Ok(())
 }
 
+/// Checks that the remote tracking ref `refs/remotes/<remote>/<branch>` resolves to a commit.
+pub fn validate_remote_branch_exists(repo_path: &Path, remote: &str, branch: &str) -> Result<()> {
+    let git_ref = format!("refs/remotes/{remote}/{branch}");
+    resolve_ref(repo_path, &git_ref)
+        .with_context(|| format!("remote branch '{remote}/{branch}' does not exist"))?;
+    Ok(())
+}
+
 pub fn current_head_sha(repo_path: &Path) -> Result<String> {
     run_git(repo_path, &["rev-parse", "HEAD"])
 }

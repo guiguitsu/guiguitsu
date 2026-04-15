@@ -47,6 +47,9 @@ Subcommands:
                                    and from the config. With no arg, list removable stacks.
   join <from>... <into>            Squash one or more commits into a destination commit
                                    (runs jj squash --from <from> ... --into <into>)
+  add-stack <remote/stack_name>    Add an existing remote branch as a parent of the workspace
+                                   merge commit. <remote/stack_name> must be a valid remote
+                                   tracking ref (e.g. origin/my-feature).
 ",
         bin = bin_name
     );
@@ -106,6 +109,10 @@ pub enum CliCommand {
         repo_path: PathBuf,
         from_commits: Vec<String>,
         into_commit: String,
+    },
+    AddStack {
+        repo_path: PathBuf,
+        existing_stack: String,
     },
 }
 
@@ -204,6 +211,18 @@ pub fn parse_command(args: Vec<String>) -> Result<CliCommand> {
 
     if args.first().map(String::as_str) == Some("join") {
         return parse_join_command(&args[1..]);
+    }
+
+    if args.first().map(String::as_str) == Some("add-stack") {
+        let existing_stack = args.get(1)
+            .ok_or_else(|| anyhow::anyhow!("add-stack requires a <remote/stack_name> argument"))?
+            .to_string();
+        if existing_stack.is_empty() {
+            bail!("add-stack argument cannot be empty");
+        }
+        let repo_path = args.get(2).map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory"));
+        return Ok(CliCommand::AddStack { repo_path, existing_stack });
     }
 
     parse_run_command(args)
@@ -477,11 +496,19 @@ pub fn dispatch_non_gui(cmd: CliCommand) -> Result<bool> {
             join_commits(repo_path, from_commits, into_commit)?;
             Ok(true)
         }
+        CliCommand::AddStack { repo_path, existing_stack } => {
+            add_stack(repo_path, existing_stack)?;
+            Ok(true)
+        }
         CliCommand::Run { .. } => Ok(false),
     }
 }
 
 pub fn create_config(repo_path: PathBuf, mut config: Config, after_sha: Option<String>, merge_commit: Option<String>) -> Result<()> {
+    if !repo_path.join(".jj").is_dir() {
+        bail!(".jj folder not found in {}. Please run `jj git init --colocate` first.", repo_path.display());
+    }
+
     config.validate(&repo_path)?;
 
     if let Some(ref mc) = config.merge_commit {
@@ -545,6 +572,38 @@ pub fn apply_branch(repo_path: PathBuf, branch_name: String) -> Result<()> {
     });
     config.save(&repo_path)?;
     jujutsu::absorb(&repo_path, &[config::FILE_NAME])?;
+    Ok(())
+}
+
+pub fn add_stack(repo_path: PathBuf, existing_stack: String) -> Result<()> {
+    let (remote, stack_name) = existing_stack.split_once('/')
+        .ok_or_else(|| anyhow::anyhow!(
+            "invalid format '{}': expected <remote/stack_name>", existing_stack
+        ))?;
+
+    if remote.is_empty() || stack_name.is_empty() {
+        bail!("invalid format '{}': remote and stack_name must be non-empty", existing_stack);
+    }
+
+    git_utils::validate_startup_requirements(&repo_path)?;
+    git_utils::ensure_remote_exists(&repo_path, remote)?;
+    git_utils::validate_remote_branch_exists(&repo_path, remote, stack_name)?;
+
+    let mut config = Config::load(&repo_path)?;
+
+    let jj_ref = format!("{stack_name}@{remote}");
+
+    let (merge_sha, _) = git_utils::find_workspace_merge_commit(&repo_path)?;
+    jujutsu::append_parent_to_merge_commit(&repo_path, &merge_sha, &jj_ref)?;
+
+    config.stacks.push(config::StackEntry {
+        name: stack_name.to_string(),
+        local_branch: None,
+        remote_branch: Some(jj_ref),
+    });
+    config.save(&repo_path)?;
+    jujutsu::absorb(&repo_path, &[config::FILE_NAME])?;
+
     Ok(())
 }
 
@@ -687,8 +746,7 @@ fn rebase_stacks_inner(repo_path: &Path) -> Result<()> {
 
     {
         use stacks::StackProvider;
-        let config_stacks: Vec<String> = config.stacks.iter().map(|s| s.name.clone()).collect();
-        let provider = stacks::GitStackProvider::new(repo_path.to_path_buf(), config.trunk.clone(), config_stacks, config.merge_commit.clone());
+        let provider = stacks::GitStackProvider::new(repo_path.to_path_buf(), config.trunk.clone(), config.workspace_remote.clone(), config.stacks.clone(), config.merge_commit.clone());
         let stack_infos = provider.get_stacks()?;
         for si in &stack_infos {
             if si.name == config.trunk {
@@ -716,8 +774,7 @@ pub fn advance_bookmarks(repo_path: PathBuf, push: bool, dry: bool) -> Result<()
 
     git_utils::validate_startup_requirements(&repo_path)?;
     let config = Config::load(&repo_path)?;
-    let config_stacks: Vec<String> = config.stacks.iter().map(|s| s.name.clone()).collect();
-    let provider = GitStackProvider::new(repo_path.clone(), config.trunk.clone(), config_stacks, config.merge_commit.clone());
+    let provider = GitStackProvider::new(repo_path.clone(), config.trunk.clone(), config.workspace_remote.clone(), config.stacks.clone(), config.merge_commit.clone());
     let stacks = provider.get_stacks()?;
     let bookmarks_map = jujutsu::bookmarks_by_commit(&repo_path)?;
 
@@ -846,8 +903,7 @@ pub fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
 
     git_utils::validate_startup_requirements(&repo_path)?;
     let config = Config::load(&repo_path)?;
-    let config_stacks: Vec<String> = config.stacks.iter().map(|s| s.name.clone()).collect();
-    let provider = GitStackProvider::new(repo_path.clone(), config.trunk.clone(), config_stacks, config.merge_commit.clone());
+    let provider = GitStackProvider::new(repo_path.clone(), config.trunk.clone(), config.workspace_remote.clone(), config.stacks.clone(), config.merge_commit.clone());
     let stacks = provider.get_stacks()?;
 
     let trunk_remote_ref = config.base_ref();
@@ -855,11 +911,20 @@ pub fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
 
     // Build a map of head-commit-SHA → push command for stacks whose remote branch
     // is not pointing at the head commit.
+    // For non-trunk stacks we only use head_commit_id() (no fallback to
+    // base_commit_id) because the base is on the trunk ancestry and would
+    // cause the push command to appear in the trunk section instead.
     let mut push_commands: HashMap<String, String> = HashMap::new();
     for (stack, entry) in stacks.iter().zip(config.stacks.iter()) {
         if let Some(ref remote_branch) = entry.remote_branch {
             if let Some((branch, remote)) = remote_branch.rsplit_once('@') {
-                let head_sha = stack.head_commit_id().unwrap_or(&stack.base_commit_id);
+                let is_trunk = stack.name == config.trunk;
+                let head_sha = if is_trunk {
+                    Some(stack.head_commit_id().unwrap_or(&stack.base_commit_id))
+                } else {
+                    stack.head_commit_id()
+                };
+                let Some(head_sha) = head_sha else { continue };
                 let git_ref = format!("refs/remotes/{remote}/{branch}");
                 let remote_on_head = git_utils::resolve_ref(&repo_path, &git_ref)
                     .map(|sha| sha == head_sha)
@@ -1108,8 +1173,7 @@ mod tests {
         apply_branch(repo.path.clone(), "foo".to_string())?;
 
         let config = crate::config::Config::load(&repo.path)?;
-        let config_stacks: Vec<String> = config.stacks.iter().map(|s| s.name.clone()).collect();
-        let provider = GitStackProvider::new(repo.path.clone(), config.trunk.clone(), config_stacks, None);
+        let provider = GitStackProvider::new(repo.path.clone(), config.trunk.clone(), config.workspace_remote.clone(), config.stacks.clone(), None);
         let stacks = provider.get_stacks()?;
         let names: Vec<&str> = stacks.iter().map(|s| s.name.as_str()).collect();
 

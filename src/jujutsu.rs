@@ -106,6 +106,15 @@ pub fn rebase_merge_commit(repo_path: &Path, merge_sha: &str, parents: &[String]
     run_jj(repo_path, &["log", "-r", &change_id, "--no-graph", "-T", "commit_id"])
 }
 
+/// Appends `new_parent` to the merge commit's existing parents and rebases.
+/// Returns the new git commit SHA of the merge commit.
+pub fn append_parent_to_merge_commit(repo_path: &Path, merge_sha: &str, new_parent: &str) -> Result<String> {
+    let mut parents = crate::git_utils::parent_shas(repo_path, merge_sha)?;
+    let merge_change_id = to_change_id(repo_path, merge_sha)?;
+    parents.push(new_parent.to_string());
+    rebase_merge_commit(repo_path, &merge_change_id, &parents, true)
+}
+
 /// Rebase the merge commit and all its descendants onto the given parents.
 /// Uses `jj rebase -s` (source) so descendants are also rebased.
 pub fn rebase_source(repo_path: &Path, revision: &str, parents: &[String]) -> Result<()> {
