@@ -60,12 +60,6 @@ impl Config {
         git_utils::ensure_remote_exists(repo_path, &self.workspace_remote)?;
 
         for entry in &self.stacks {
-            let is_trunk = entry.name == self.trunk;
-            if !is_trunk {
-                if entry.local_branch.is_none() {
-                    bail!("stack '{}' is missing required field 'local_branch'", entry.name);
-                }
-            }
             if entry.remote_branch.is_none() {
                 bail!("stack '{}' is missing required field 'remote_branch'", entry.name);
             }

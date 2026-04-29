@@ -30,7 +30,7 @@ create-config options:
   --merge-commit=<sha>             SHA of the workspace merge commit (written to config)
 
 Subcommands:
-  stacks [-v] [<repo-path>]         Print stacks to stdout and exit (no GUI)
+  stacks [-v] [--simplified] [<repo-path>]  Print stacks to stdout and exit (no GUI)
   rebase [<repo-path>]             Rebase workspace merge commit so its trunk
                                    parent points to the latest remote trunk
   advance [--push] [--dry] [<path>]  Advance outdated bookmarks to their stack head
@@ -71,6 +71,7 @@ pub enum CliCommand {
     Stacks {
         repo_path: PathBuf,
         verbose: bool,
+        simplified: bool,
     },
     ApplyBranch {
         repo_path: PathBuf,
@@ -166,17 +167,20 @@ pub fn parse_command(args: Vec<String>) -> Result<CliCommand> {
     if args.first().map(String::as_str) == Some("stacks") {
         let rest = &args[1..];
         let mut verbose = false;
+        let mut simplified = false;
         let mut repo_arg: Option<PathBuf> = None;
         for arg in rest {
             if arg == "-v" || arg == "--verbose" {
                 verbose = true;
+            } else if arg == "--simplified" {
+                simplified = true;
             } else if !arg.starts_with('-') {
                 repo_arg = Some(PathBuf::from(arg));
             }
         }
         let repo_path = repo_arg
             .unwrap_or_else(|| std::env::current_dir().expect("failed to get current directory"));
-        return Ok(CliCommand::Stacks { repo_path, verbose });
+        return Ok(CliCommand::Stacks { repo_path, verbose, simplified });
     }
 
     if args.first().map(String::as_str) == Some("rm-stack") {
@@ -456,8 +460,8 @@ pub fn dispatch_non_gui(cmd: CliCommand) -> Result<bool> {
             create_config(repo_path, config, after_sha, merge_commit)?;
             Ok(true)
         }
-        CliCommand::Stacks { repo_path, verbose } => {
-            print_stacks(repo_path, verbose)?;
+        CliCommand::Stacks { repo_path, verbose, simplified } => {
+            print_stacks(repo_path, verbose, simplified)?;
             Ok(true)
         }
         CliCommand::ApplyBranch { repo_path, branch_name } => {
@@ -874,7 +878,10 @@ fn resolve_branches_by_commit(repo_path: &Path, config: &Config) -> HashMap<Stri
         if let Some(ref local_branch) = entry.local_branch {
             let git_ref = format!("refs/heads/{local_branch}");
             if let Ok(sha) = git_utils::resolve_ref(repo_path, &git_ref) {
-                map.entry(sha).or_default().push(local_branch.clone());
+                let names = map.entry(sha).or_default();
+                if !names.contains(local_branch) {
+                    names.push(local_branch.clone());
+                }
             }
         }
         if let Some(ref remote_branch) = entry.remote_branch {
@@ -882,7 +889,10 @@ fn resolve_branches_by_commit(repo_path: &Path, config: &Config) -> HashMap<Stri
             if let Some((branch, remote)) = remote_branch.rsplit_once('@') {
                 let git_ref = format!("refs/remotes/{remote}/{branch}");
                 if let Ok(sha) = git_utils::resolve_ref(repo_path, &git_ref) {
-                    map.entry(sha).or_default().push(remote_branch.clone());
+                    let names = map.entry(sha).or_default();
+                    if !names.contains(remote_branch) {
+                        names.push(remote_branch.clone());
+                    }
                 }
             }
         }
@@ -890,7 +900,7 @@ fn resolve_branches_by_commit(repo_path: &Path, config: &Config) -> HashMap<Stri
     map
 }
 
-pub fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
+pub fn print_stacks(repo_path: PathBuf, verbose: bool, simplified: bool) -> Result<()> {
     use stacks::{GitStackProvider, StackProvider};
 
     const RESET: &str = "\x1b[0m";
@@ -904,7 +914,12 @@ pub fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
     git_utils::validate_startup_requirements(&repo_path)?;
     let config = Config::load(&repo_path)?;
     let provider = GitStackProvider::new(repo_path.clone(), config.trunk.clone(), config.workspace_remote.clone(), config.stacks.clone(), config.merge_commit.clone());
+    let t_total = std::time::Instant::now();
+    let t_get_stacks = std::time::Instant::now();
     let stacks = provider.get_stacks()?;
+    if verbose {
+        eprintln!("[debug] get_stacks: {:.2?} ({} stacks)", t_get_stacks.elapsed(), stacks.len());
+    }
 
     let trunk_remote_ref = config.base_ref();
     let bookmarks_map = resolve_branches_by_commit(&repo_path, &config);
@@ -915,36 +930,45 @@ pub fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
     // base_commit_id) because the base is on the trunk ancestry and would
     // cause the push command to appear in the trunk section instead.
     let mut push_commands: HashMap<String, String> = HashMap::new();
-    for (stack, entry) in stacks.iter().zip(config.stacks.iter()) {
-        if let Some(ref remote_branch) = entry.remote_branch {
-            if let Some((branch, remote)) = remote_branch.rsplit_once('@') {
-                let is_trunk = stack.name == config.trunk;
-                let head_sha = if is_trunk {
-                    Some(stack.head_commit_id().unwrap_or(&stack.base_commit_id))
-                } else {
-                    stack.head_commit_id()
-                };
-                let Some(head_sha) = head_sha else { continue };
-                let git_ref = format!("refs/remotes/{remote}/{branch}");
-                let remote_on_head = git_utils::resolve_ref(&repo_path, &git_ref)
-                    .map(|sha| sha == head_sha)
-                    .unwrap_or(false);
-                if !remote_on_head {
-                    let short = &head_sha[..8.min(head_sha.len())];
-                    push_commands.insert(
-                        head_sha.to_string(),
-                        format!("git push {remote} {short}:refs/heads/{branch}"),
-                    );
+    if !simplified {
+        for (stack, entry) in stacks.iter().zip(config.stacks.iter()) {
+            if let Some(ref remote_branch) = entry.remote_branch {
+                if let Some((branch, remote)) = remote_branch.rsplit_once('@') {
+                    let is_trunk = stack.name == config.trunk;
+                    let head_sha = if is_trunk {
+                        Some(stack.head_commit_id().unwrap_or(&stack.base_commit_id))
+                    } else {
+                        stack.head_commit_id()
+                    };
+                    let Some(head_sha) = head_sha else { continue };
+                    let git_ref = format!("refs/remotes/{remote}/{branch}");
+                    let remote_on_head = git_utils::resolve_ref(&repo_path, &git_ref)
+                        .map(|sha| sha == head_sha)
+                        .unwrap_or(false);
+                    if !remote_on_head {
+                        let short = &head_sha[..8.min(head_sha.len())];
+                        push_commands.insert(
+                            head_sha.to_string(),
+                            format!("git push {remote} {short}:refs/heads/{branch}"),
+                        );
+                    }
                 }
             }
         }
     }
 
     let mut needs_rebase = false;
+    let mut t_is_empty_total = std::time::Duration::ZERO;
+    let mut is_empty_count = 0usize;
     for stack in &stacks {
         let is_trunk = stack.name == config.trunk;
         let head_sha = stack.head_commit_id().unwrap_or(&stack.base_commit_id);
-        let head_change_id = jujutsu::to_change_id(&repo_path, head_sha).unwrap_or_default();
+        let head_display_id = if simplified {
+            head_sha[..8.min(head_sha.len())].to_string()
+        } else {
+            let cid = jujutsu::to_change_id(&repo_path, head_sha).unwrap_or_default();
+            cid[..8.min(cid.len())].to_string()
+        };
         let head_subject = git_utils::commit_subject(&repo_path, head_sha).unwrap_or_default();
         if is_trunk {
             let trunk_behind = git_utils::is_ancestor(&repo_path, head_sha, &trunk_remote_ref).unwrap_or(false)
@@ -958,18 +982,35 @@ pub fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
                 String::new()
             };
             print!("{CYAN}{}{RESET}", stack.name);
-            println!(" ({GREEN}head: {} - {}{RESET}){trunk_notice}", &head_change_id[..8.min(head_change_id.len())], head_subject);
+            println!(" ({GREEN}head: {} - {}{RESET}){trunk_notice}", head_display_id, head_subject);
             // List commits from trunk HEAD back to (and including) the remote trunk ref.
             if let Ok(trunk_remote_sha) = git_utils::resolve_ref(&repo_path, &trunk_remote_ref) {
+                let t_trunk_range = std::time::Instant::now();
                 if let Ok(mut trunk_commits) = git_utils::commits_in_range(&repo_path, &trunk_remote_sha, head_sha) {
-                    for commit in &mut trunk_commits {
-                        if let Ok(cid) = jujutsu::to_change_id(&repo_path, &commit.commit_id) {
-                            commit.change_id = cid;
+                    let elapsed_trunk_range = t_trunk_range.elapsed();
+                    let trunk_commit_count = trunk_commits.len();
+                    if !simplified {
+                        let t_trunk_cid = std::time::Instant::now();
+                        for commit in &mut trunk_commits {
+                            if let Ok(cid) = jujutsu::to_change_id(&repo_path, &commit.commit_id) {
+                                commit.change_id = cid;
+                            }
                         }
+                        if verbose {
+                            eprintln!("[debug] trunk: commits_in_range {:.2?} ({} commits), to_change_id {:.2?}",
+                                elapsed_trunk_range, trunk_commit_count, t_trunk_cid.elapsed());
+                        }
+                    } else if verbose {
+                        eprintln!("[debug] trunk: commits_in_range {:.2?} ({} commits), to_change_id skipped",
+                            elapsed_trunk_range, trunk_commit_count);
                     }
                     // Append the remote trunk commit itself.
                     if let Ok(remote_subject) = git_utils::commit_subject(&repo_path, &trunk_remote_sha) {
-                        let remote_change_id = jujutsu::to_change_id(&repo_path, &trunk_remote_sha).unwrap_or_else(|_| trunk_remote_sha.clone());
+                        let remote_change_id = if simplified {
+                            trunk_remote_sha.clone()
+                        } else {
+                            jujutsu::to_change_id(&repo_path, &trunk_remote_sha).unwrap_or_else(|_| trunk_remote_sha.clone())
+                        };
                         trunk_commits.push(git_utils::CommitInfo {
                             commit_id: trunk_remote_sha.clone(),
                             change_id: remote_change_id,
@@ -986,16 +1027,25 @@ pub fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
                         } else {
                             String::new()
                         };
-                        let push_suffix = push_commands.get(&commit.commit_id)
-                            .map(|cmd| format!(" {RED}{cmd}{RESET}"))
-                            .unwrap_or_default();
-                        println!("  {DIM}{} / {}{RESET} {}{bookmark_suffix}{push_suffix}", &commit.change_id[..8.min(commit.change_id.len())], &commit.commit_id[..8.min(commit.commit_id.len())], commit.description);
+                        if simplified {
+                            println!("  {DIM}{}{RESET} {}{bookmark_suffix}", &commit.commit_id[..8.min(commit.commit_id.len())], commit.description);
+                        } else {
+                            let push_suffix = push_commands.get(&commit.commit_id)
+                                .map(|cmd| format!(" {RED}{cmd}{RESET}"))
+                                .unwrap_or_default();
+                            println!("  {DIM}{} / {}{RESET} {}{bookmark_suffix}{push_suffix}", &commit.change_id[..8.min(commit.change_id.len())], &commit.commit_id[..8.min(commit.commit_id.len())], commit.description);
+                        }
                     }
                 }
             }
         } else {
             let base = &stack.base_commit_id;
-            let base_change_id = jujutsu::to_change_id(&repo_path, base).unwrap_or_default();
+            let base_display_id = if simplified {
+                base[..8.min(base.len())].to_string()
+            } else {
+                let cid = jujutsu::to_change_id(&repo_path, base).unwrap_or_default();
+                cid[..8.min(cid.len())].to_string()
+            };
             let base_subject = git_utils::commit_subject(&repo_path, base).unwrap_or_default();
             let stack_needs_rebase = git_utils::is_ancestor(&repo_path, base, &trunk_remote_ref).unwrap_or(false)
                 && !git_utils::is_ancestor(&repo_path, &trunk_remote_ref, base).unwrap_or(true);
@@ -1008,8 +1058,8 @@ pub fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
                 String::new()
             };
             print!("{CYAN}{}{RESET}", stack.name);
-            print!(" ({GREEN}head: {} - {}{RESET}", &head_change_id[..8.min(head_change_id.len())], head_subject);
-            print!(", {YELLOW}base: {} - {}{RESET}", &base_change_id[..8.min(base_change_id.len())], base_subject);
+            print!(" ({GREEN}head: {} - {}{RESET}", head_display_id, head_subject);
+            print!(", {YELLOW}base: {} - {}{RESET}", base_display_id, base_subject);
             if verbose {
                 if let Some(root) = stack.root_commit_id() {
                     let root_change_id = jujutsu::to_change_id(&repo_path, root).unwrap_or_default();
@@ -1033,15 +1083,21 @@ pub fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
                 } else {
                     String::new()
                 };
-                let empty_suffix = if jujutsu::is_empty_commit(&repo_path, &commit.commit_id).unwrap_or(false) {
-                    format!(" {RED}(empty){RESET}")
+                if simplified {
+                    println!("  {DIM}{}{RESET} {}{bookmark_suffix}", &commit.commit_id[..8.min(commit.commit_id.len())], commit.description);
                 } else {
-                    String::new()
-                };
-                let push_suffix = push_commands.get(&commit.commit_id)
-                    .map(|cmd| format!(" {RED}{cmd}{RESET}"))
-                    .unwrap_or_default();
-                println!("  {DIM}{} / {}{RESET} {}{bookmark_suffix}{empty_suffix}{push_suffix}", &commit.change_id[..8.min(commit.change_id.len())], &commit.commit_id[..8.min(commit.commit_id.len())], commit.description);
+                    let empty_suffix = {
+                        let t_e = std::time::Instant::now();
+                        let is_empty = jujutsu::is_empty_commit(&repo_path, &commit.commit_id).unwrap_or(false);
+                        t_is_empty_total += t_e.elapsed();
+                        is_empty_count += 1;
+                        if is_empty { format!(" {RED}(empty){RESET}") } else { String::new() }
+                    };
+                    let push_suffix = push_commands.get(&commit.commit_id)
+                        .map(|cmd| format!(" {RED}{cmd}{RESET}"))
+                        .unwrap_or_default();
+                    println!("  {DIM}{} / {}{RESET} {}{bookmark_suffix}{empty_suffix}{push_suffix}", &commit.change_id[..8.min(commit.change_id.len())], &commit.commit_id[..8.min(commit.commit_id.len())], commit.description);
+                }
             }
             if verbose {
                 if let (Some(root), Some(head)) = (stack.root_commit_id(), stack.head_commit_id()) {
@@ -1062,16 +1118,31 @@ pub fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
         }
     }
     if let Some(ref merge_ref) = config.merge_commit {
+        let t_descendants = std::time::Instant::now();
         let unstacked = jujutsu::descendants_of(&repo_path, merge_ref)?;
+        if verbose {
+            eprintln!("[debug] descendants_of: {:.2?} ({} commits)", t_descendants.elapsed(), unstacked.len());
+        }
         if !unstacked.is_empty() {
             println!("{CYAN}Unstacked{RESET}");
+            let mut all_empty = true;
             for commit in &unstacked {
-                let empty_suffix = if jujutsu::is_empty_commit(&repo_path, &commit.commit_id).unwrap_or(false) {
-                    format!(" {RED}(empty){RESET}")
+                let is_empty = if simplified {
+                    false
                 } else {
-                    String::new()
+                    let t_e = std::time::Instant::now();
+                    let e = jujutsu::is_empty_commit(&repo_path, &commit.commit_id).unwrap_or(false);
+                    t_is_empty_total += t_e.elapsed();
+                    is_empty_count += 1;
+                    e
                 };
-                println!("  {DIM}{} / {}{RESET} {}{empty_suffix}", &commit.change_id[..8.min(commit.change_id.len())], &commit.commit_id[..8.min(commit.commit_id.len())], commit.description);
+                if !is_empty { all_empty = false; }
+                if simplified {
+                    println!("  {DIM}{}{RESET} {}", &commit.commit_id[..8.min(commit.commit_id.len())], commit.description);
+                } else {
+                    let empty_suffix = if is_empty { format!(" {RED}(empty){RESET}") } else { String::new() };
+                    println!("  {DIM}{} / {}{RESET} {}{empty_suffix}", &commit.change_id[..8.min(commit.change_id.len())], &commit.commit_id[..8.min(commit.commit_id.len())], commit.description);
+                }
                 if let Ok(files_output) = git_utils::run_command(
                     "git",
                     &["diff-tree", "--no-commit-id", "--name-only", "-r", &commit.commit_id],
@@ -1085,9 +1156,6 @@ pub fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
                     }
                 }
             }
-            let all_empty = unstacked.iter().all(|c| {
-                jujutsu::is_empty_commit(&repo_path, &c.commit_id).unwrap_or(false)
-            });
             if !all_empty {
                 println!();
                 let sha_placeholder = if unstacked.len() == 1 {
@@ -1109,6 +1177,10 @@ pub fn print_stacks(repo_path: PathBuf, verbose: bool) -> Result<()> {
         }
     }
 
+    if verbose {
+        eprintln!("[debug] is_empty_commit: {} calls, total {:.2?}", is_empty_count, t_is_empty_total);
+        eprintln!("[debug] total: {:.2?}", t_total.elapsed());
+    }
     if needs_rebase {
         println!();
         println!("Rebase your stacks with \"gg rebase\"");

@@ -75,6 +75,7 @@ impl StackProvider for GitStackProvider {
         // Default: positional (config_stacks[i] → git_parents[i]).
         let mut parent_index_for: Vec<usize> = (0..self.config_stacks.len()).collect();
 
+        let t_branch_res = std::time::Instant::now();
         for (ci, entry) in self.config_stacks.iter().enumerate() {
             let branch_ref = if entry.name == self.trunk_name {
                 // For trunk, match via remote ref
@@ -97,6 +98,9 @@ impl StackProvider for GitStackProvider {
                 }
             }
         }
+        if crate::verbose() {
+            eprintln!("[debug:stacks] branch resolution: {:.2?}", t_branch_res.elapsed());
+        }
 
         let trunk_index = self.config_stacks.iter()
             .position(|s| s.name == self.trunk_name)
@@ -113,12 +117,24 @@ impl StackProvider for GitStackProvider {
                     base_commit_id: trunk_sha.clone(),
                 });
             } else {
+                let t_merge_base = std::time::Instant::now();
                 let base = merge_base(&self.repo_path, trunk_sha, parent_sha)?;
+                let elapsed_merge_base = t_merge_base.elapsed();
+                let t_range = std::time::Instant::now();
                 let mut commits = commits_in_range(&self.repo_path, trunk_sha, parent_sha)?;
+                let elapsed_range = t_range.elapsed();
+                let commit_count = commits.len();
+                let t_cid = std::time::Instant::now();
                 for commit in &mut commits {
                     if let Ok(cid) = crate::jujutsu::to_change_id(&self.repo_path, &commit.commit_id) {
                         commit.change_id = cid;
                     }
+                }
+                if crate::verbose() {
+                    eprintln!(
+                        "[debug:stacks] '{}': merge_base {:.2?}, commits_in_range {:.2?} ({} commits), to_change_id {:.2?}",
+                        entry.name, elapsed_merge_base, elapsed_range, commit_count, t_cid.elapsed()
+                    );
                 }
                 stacks.push(StackInfo {
                     name: entry.name.clone(),
